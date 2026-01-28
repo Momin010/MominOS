@@ -1,0 +1,8 @@
+# Binaries
+bin/
+*.bin
+*.img
+
+# Logs and temps
+*.log
+*.tmp
