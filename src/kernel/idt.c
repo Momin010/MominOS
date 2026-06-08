@@ -96,7 +96,7 @@ void isr_handler(struct isr_frame *frame) {
             keyboard_irq();
 
         pic_send_eoi(irq);
-        if (irq == 0)
+        if (irq == 0 || irq == 1)
             sched_after_irq();
         return;
     }

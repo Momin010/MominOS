@@ -43,7 +43,8 @@ C_SRCS   = src/kernel/kmain.c src/kernel/pmm.c src/kernel/vmm.c src/kernel/kheap
             src/kernel/elf.c src/kernel/idt.c \
             src/fs/ext2.c src/fs/vfs.c \
             src/drivers/serial.c src/drivers/vga.c src/drivers/pic.c \
-            src/drivers/timer.c src/drivers/keyboard.c src/drivers/ata.c
+            src/drivers/timer.c src/drivers/keyboard.c src/drivers/ata.c \
+            src/drivers/tty.c
 ASM_SRCS = src/kernel/kernel_entry.asm src/kernel/isr.asm src/kernel/switch.asm \
            src/kernel/usermode.asm
 

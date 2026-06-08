@@ -154,6 +154,8 @@ void sched_init(void) {
 
     boot->id = next_thread_id++;
     boot->state = THREAD_RUNNING;
+    boot->cwd[0] = '/';
+    boot->cwd[1] = 0;
     boot->kernel_stack_top = (uint64_t)boot->stack_base + THREAD_STACK_SIZE;
     boot->pml4 = vmm_kernel_pml4();
     fxsave_to(boot->fxsave);
@@ -205,6 +207,8 @@ static struct thread *thread_create_with_pml4(thread_entry_t entry, void *arg, u
     thread->pml4 = pml4;
     thread->id = next_thread_id++;
     thread->state = THREAD_READY;
+    thread->cwd[0] = '/';
+    thread->cwd[1] = 0;
 
     fxsave_to(thread->fxsave);
     map_kernel_range(pml4, (uint64_t)thread, sizeof(*thread));
@@ -265,4 +269,69 @@ uint64_t sched_current_kernel_stack(void) {
     if (current_thread == 0)
         return 0;
     return current_thread->kernel_stack_top;
+}
+
+struct thread *sched_current_thread(void) {
+    return current_thread;
+}
+
+void sched_block(void) {
+    uint64_t flags = irq_save();
+
+    current_thread->state = THREAD_BLOCKED;
+    need_resched = 1;
+    schedule_locked();
+    irq_restore(flags);
+}
+
+void sched_wake(struct thread *thread) {
+    uint64_t flags = irq_save();
+
+    if (thread != 0 && thread->state == THREAD_BLOCKED) {
+        thread->state = THREAD_READY;
+        need_resched = 1;
+    }
+    irq_restore(flags);
+}
+
+void thread_exit_code(int code) {
+    uint64_t flags = irq_save();
+
+    current_thread->exit_code = code;
+    current_thread->has_exited = 1;
+    current_thread->state = THREAD_ZOMBIE;
+    if (current_thread->waiter != 0 && current_thread->waiter->state == THREAD_BLOCKED) {
+        current_thread->waiter->state = THREAD_READY;
+    }
+    need_resched = 1;
+
+    while (1) {
+        schedule_locked();
+        irq_restore(flags);
+        __asm__ volatile ("cli; hlt");
+        flags = irq_save();
+    }
+}
+
+void sched_reap(struct thread *thread) {
+    uint64_t flags = irq_save();
+    struct thread *pred;
+
+    if (thread == 0 || thread->state != THREAD_ZOMBIE) {
+        irq_restore(flags);
+        return;
+    }
+
+    /* unlink from the circular ring: find predecessor whose next is thread */
+    pred = thread;
+    while (pred->next != thread)
+        pred = pred->next;
+    pred->next = thread->next;
+
+    thread->state = THREAD_DEAD;
+    irq_restore(flags);
+
+    /* now safe to free; we are running on a different thread's stack */
+    kfree(thread->stack_base);
+    kfree(thread);
 }

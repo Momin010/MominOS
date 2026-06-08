@@ -12,28 +12,31 @@
 #include "vfs.h"
 #include "arch.h"
 #include "elf.h"
+#include "tty.h"
 
-static void print_worker(void *arg) {
-    char c = (char)(uint64_t)arg;
-    uint64_t last = 0;
-
-    while (1) {
-        uint64_t ticks = timer_ticks();
-        uint64_t bucket = ticks / 25;
-
-        if (bucket != last) {
-            serial_putc(c);
-            last = bucket;
-            sched_yield();
-        }
+/* Boot self-test: inject canned keystrokes into the TTY so the ring-3
+   program's blocking read() exercises the real IRQ-wake path with no
+   physical typing. Gives the userspace reader time to block first. */
+static void tty_feed_str(const char *s) {
+    while (*s) {
+        tty_feed(*s);
+        s++;
     }
 }
 
-static void busy_worker(void *arg) {
-    volatile uint64_t counter = (uint64_t)arg;
+static void boot_input_test(void *arg) {
+    (void)arg;
+    uint64_t start = timer_ticks();
+
+    /* let /init reach its blocking read() before we deliver input */
+    while (timer_ticks() - start < 100)
+        sched_yield();
+
+    serial_print("[TEST] feeding line to tty\n");
+    tty_feed_str("hello tty\n");
 
     while (1)
-        counter++;
+        sched_yield();
 }
 
 void kmain(void) {
@@ -64,6 +67,7 @@ void kmain(void) {
     pic_mask_all();
     timer_init(100);
     keyboard_init();
+    tty_init();
     pic_clear_mask(0);
     pic_clear_mask(1);
     __asm__ volatile ("sti");
@@ -78,9 +82,7 @@ void kmain(void) {
         }
     }
 
-    thread_create(print_worker, (void *)(uint64_t)'A');
-    thread_create(print_worker, (void *)(uint64_t)'B');
-    thread_create(busy_worker, 0);
+    thread_create(boot_input_test, 0);
 
     vga_clear();
     vga_set_color(0x0A);

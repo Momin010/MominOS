@@ -1,5 +1,6 @@
 #include "keyboard.h"
 #include "serial.h"
+#include "tty.h"
 
 #define KEYBOARD_DATA 0x60
 
@@ -31,6 +32,6 @@ void keyboard_irq(void) {
         return;
 
     if (scancode < sizeof(scancode_ascii) && scancode_ascii[scancode])
-        serial_putc(scancode_ascii[scancode]);
+        tty_feed(scancode_ascii[scancode]);
 }
 
