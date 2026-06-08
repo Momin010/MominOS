@@ -1,7 +1,7 @@
 CC     = gcc
 CFLAGS = -std=gnu99 -ffreestanding -fno-pic -fno-stack-protector -m64 \
          -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
-         -Wall -Wextra -O2 -Isrc/kernel -Isrc/drivers
+         -Wall -Wextra -O2 -Isrc/kernel -Isrc/drivers -Isrc/fs
 
 AS      = nasm
 ASFLAGS = -f elf64
@@ -38,6 +38,7 @@ $(BIN)/boot_loader_padded.bin: $(BIN)/boot_loader.bin
 
 C_SRCS   = src/kernel/kmain.c src/kernel/pmm.c src/kernel/vmm.c src/kernel/kheap.c \
             src/kernel/sched.c src/kernel/idt.c \
+            src/fs/ext2.c src/fs/vfs.c \
             src/drivers/serial.c src/drivers/vga.c src/drivers/pic.c \
             src/drivers/timer.c src/drivers/keyboard.c src/drivers/ata.c
 ASM_SRCS = src/kernel/kernel_entry.asm src/kernel/isr.asm src/kernel/switch.asm
@@ -66,8 +67,13 @@ $(BIN)/mominos.img: $(BIN)/boot_mbr.bin $(BIN)/boot_loader_padded.bin $(BIN)/ker
 	cat $^ > $@
 	truncate -s 1474560 $@
 
-$(BIN)/disk.img: | $(BIN)
-	truncate -s 64M $@
+$(BIN)/disk.img: Makefile | $(BIN)
+	rm -rf $(BIN)/fsroot
+	mkdir -p $(BIN)/fsroot
+	printf 'hello from MominOS ext2\n' > $(BIN)/fsroot/hello.txt
+	dd if=/dev/zero of=$(BIN)/fsroot/big.bin bs=1M count=5 status=none
+	rm -f $@
+	mke2fs -q -F -t ext2 -b 4096 -d $(BIN)/fsroot $@ 64M
 
 # --- Run ---
 
