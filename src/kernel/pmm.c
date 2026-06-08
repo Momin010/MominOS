@@ -44,6 +44,10 @@ static void mark_region(uint64_t base, uint64_t length, int used) {
 }
 
 void pmm_init(void) {
+    for (uint64_t i = 0; i < BITMAP_SIZE; i++)
+        bitmap[i] = 0xFF;
+    free_pages = 0;
+
     uint16_t *count_ptr = (uint16_t *)0x5FF8;
     uint16_t entry_count = *count_ptr;
     uint8_t *entries = (uint8_t *)0x6000;
