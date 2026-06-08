@@ -10,6 +10,8 @@
 #include "timer.h"
 #include "ata.h"
 #include "vfs.h"
+#include "arch.h"
+#include "elf.h"
 
 static void print_worker(void *arg) {
     char c = (char)(uint64_t)arg;
@@ -54,6 +56,7 @@ void kmain(void) {
 
     kheap_init();
 
+    arch_init();
     sched_init();
 
     idt_init();
@@ -70,6 +73,8 @@ void kmain(void) {
         if (vfs_mount_root()) {
             if (!vfs_self_test())
                 serial_print("[VFS] self-test failed\n");
+            if (!elf_spawn("/init"))
+                serial_print("[ELF] spawn failed\n");
         }
     }
 

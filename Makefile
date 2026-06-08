@@ -8,6 +8,8 @@ ASFLAGS = -f elf64
 
 LD      = ld
 LDFLAGS = -nostdlib -z noexecstack -T src/kernel/linker.ld
+USER_CFLAGS = -nostdlib -ffreestanding -fno-pic -no-pie -m64 \
+              -mno-red-zone -Wall -Wextra -O2
 
 BIN = bin
 
@@ -37,11 +39,13 @@ $(BIN)/boot_loader_padded.bin: $(BIN)/boot_loader.bin
 # --- Kernel ---
 
 C_SRCS   = src/kernel/kmain.c src/kernel/pmm.c src/kernel/vmm.c src/kernel/kheap.c \
-            src/kernel/sched.c src/kernel/idt.c \
+            src/kernel/sched.c src/kernel/arch.c src/kernel/syscall.c \
+            src/kernel/elf.c src/kernel/idt.c \
             src/fs/ext2.c src/fs/vfs.c \
             src/drivers/serial.c src/drivers/vga.c src/drivers/pic.c \
             src/drivers/timer.c src/drivers/keyboard.c src/drivers/ata.c
-ASM_SRCS = src/kernel/kernel_entry.asm src/kernel/isr.asm src/kernel/switch.asm
+ASM_SRCS = src/kernel/kernel_entry.asm src/kernel/isr.asm src/kernel/switch.asm \
+           src/kernel/usermode.asm
 
 C_OBJS   = $(C_SRCS:.c=.o)
 ASM_OBJS = $(ASM_SRCS:.asm=.o)
@@ -67,11 +71,15 @@ $(BIN)/mominos.img: $(BIN)/boot_mbr.bin $(BIN)/boot_loader_padded.bin $(BIN)/ker
 	cat $^ > $@
 	truncate -s 1474560 $@
 
-$(BIN)/disk.img: Makefile | $(BIN)
+$(BIN)/init: userspace/init.c | $(BIN)
+	$(CC) $(USER_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start $< -o $@
+
+$(BIN)/disk.img: Makefile $(BIN)/init | $(BIN)
 	rm -rf $(BIN)/fsroot
 	mkdir -p $(BIN)/fsroot
 	printf 'hello from MominOS ext2\n' > $(BIN)/fsroot/hello.txt
 	dd if=/dev/zero of=$(BIN)/fsroot/big.bin bs=1M count=5 status=none
+	cp $(BIN)/init $(BIN)/fsroot/init
 	rm -f $@
 	mke2fs -q -F -t ext2 -b 4096 -d $(BIN)/fsroot $@ 64M
 

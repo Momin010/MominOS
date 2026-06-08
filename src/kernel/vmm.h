@@ -9,6 +9,10 @@
 #define VMM_NOEXEC   (1ULL << 63)
 
 void vmm_init(void);
+uint64_t vmm_kernel_pml4(void);
+uint64_t vmm_create_address_space(void);
+void vmm_switch_pml4(uint64_t pml4);
+void vmm_map_in(uint64_t pml4, uint64_t virt, uint64_t phys, uint64_t flags);
 void vmm_map(uint64_t virt, uint64_t phys, uint64_t flags);
 void vmm_unmap(uint64_t virt);
 uint64_t vmm_phys(uint64_t virt);

@@ -52,9 +52,28 @@ static uint64_t *next_table(uint64_t *table, uint16_t index, uint64_t flags) {
     if (!(table[index] & VMM_PRESENT)) {
         next = alloc_table();
         table[index] = ((uint64_t)next & PAGE_ADDR_MASK) | VMM_PRESENT | VMM_WRITABLE | (flags & VMM_USER);
+    } else if (flags & VMM_USER) {
+        table[index] |= VMM_USER;
     }
 
     return (uint64_t *)(table[index] & PAGE_ADDR_MASK);
+}
+
+uint64_t vmm_kernel_pml4(void) {
+    return (uint64_t)kernel_pml4;
+}
+
+uint64_t vmm_create_address_space(void) {
+    uint64_t *pml4 = alloc_table();
+
+    for (uint64_t i = 0; i < ENTRIES_PER_TABLE; i++)
+        pml4[i] = kernel_pml4[i];
+
+    return (uint64_t)pml4;
+}
+
+void vmm_switch_pml4(uint64_t pml4) {
+    write_cr3(pml4);
 }
 
 static void map_2m(uint64_t virt, uint64_t phys, uint64_t flags) {
@@ -68,13 +87,13 @@ static void map_2m(uint64_t virt, uint64_t phys, uint64_t flags) {
     pd[pd_i] = (phys & HUGE_ADDR_MASK) | flags | VMM_PRESENT | PTE_PS;
 }
 
-static uint64_t *split_2m_page(uint64_t *pd, uint16_t index) {
+static uint64_t *split_2m_page(uint64_t *pd, uint16_t index, uint64_t flags) {
     uint64_t old = pd[index];
     uint64_t base = old & HUGE_ADDR_MASK;
     uint64_t entry_flags = old & ~HUGE_ADDR_MASK;
     uint64_t *pt = alloc_table();
 
-    entry_flags &= ~PTE_PS;
+    entry_flags = (entry_flags & ~PTE_PS) | (flags & VMM_USER);
     for (uint64_t i = 0; i < ENTRIES_PER_TABLE; i++)
         pt[i] = (base + i * PAGE_SIZE) | entry_flags;
 
@@ -113,23 +132,28 @@ void vmm_init(void) {
     serial_print("[VMM] direct map initialized\n");
 }
 
-void vmm_map(uint64_t virt, uint64_t phys, uint64_t flags) {
+void vmm_map_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags) {
     uint16_t pml4_i = (virt >> 39) & 0x1FF;
     uint16_t pdpt_i = (virt >> 30) & 0x1FF;
     uint16_t pd_i = (virt >> 21) & 0x1FF;
     uint16_t pt_i = (virt >> 12) & 0x1FF;
 
-    uint64_t *pdpt = next_table(kernel_pml4, pml4_i, flags);
+    uint64_t *pml4 = (uint64_t *)pml4_phys;
+    uint64_t *pdpt = next_table(pml4, pml4_i, flags);
     uint64_t *pd = next_table(pdpt, pdpt_i, flags);
     uint64_t *pt;
 
     if ((pd[pd_i] & (VMM_PRESENT | PTE_PS)) == (VMM_PRESENT | PTE_PS))
-        pt = split_2m_page(pd, pd_i);
+        pt = split_2m_page(pd, pd_i, flags);
     else
         pt = next_table(pd, pd_i, flags);
 
     pt[pt_i] = (phys & PAGE_ADDR_MASK) | flags | VMM_PRESENT;
     invlpg(virt);
+}
+
+void vmm_map(uint64_t virt, uint64_t phys, uint64_t flags) {
+    vmm_map_in((uint64_t)kernel_pml4, virt, phys, flags);
 }
 
 void vmm_unmap(uint64_t virt) {

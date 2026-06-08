@@ -1,6 +1,8 @@
 #include "sched.h"
+#include "arch.h"
 #include "kheap.h"
 #include "serial.h"
+#include "vmm.h"
 
 #define THREAD_STACK_SIZE (64ULL * 1024)
 
@@ -32,6 +34,21 @@ static inline void irq_restore(uint64_t flags) {
 
 static inline uint64_t align_down(uint64_t value, uint64_t align) {
     return value & ~(align - 1);
+}
+
+static void map_kernel_range(uint64_t pml4, uint64_t virt, uint64_t size) {
+    uint64_t start = virt & ~0xFFFULL;
+    uint64_t end = (virt + size + 0xFFFULL) & ~0xFFFULL;
+
+    if (pml4 == vmm_kernel_pml4())
+        return;
+
+    for (uint64_t addr = start; addr < end; addr += 4096) {
+        uint64_t phys = vmm_phys(addr);
+
+        if (phys != 0)
+            vmm_map_in(pml4, addr, phys, VMM_WRITABLE);
+    }
 }
 
 static void enable_sse(void) {
@@ -110,6 +127,9 @@ static void schedule_locked(void) {
 
     fxsave_to(old->fxsave);
     fxrstor_from(next->fxsave);
+    arch_set_kernel_stack(next->kernel_stack_top);
+    if (old->pml4 != next->pml4)
+        vmm_switch_pml4(next->pml4);
     switch_context(&old->rsp, next->rsp);
 }
 
@@ -125,18 +145,27 @@ void sched_init(void) {
             __asm__ volatile ("cli; hlt");
     }
 
+    boot->stack_base = kmalloc(THREAD_STACK_SIZE);
+    if (boot->stack_base == 0) {
+        serial_print("[SCHED] boot stack alloc failed\n");
+        while (1)
+            __asm__ volatile ("cli; hlt");
+    }
+
     boot->id = next_thread_id++;
     boot->state = THREAD_RUNNING;
-    boot->stack_base = 0;
+    boot->kernel_stack_top = (uint64_t)boot->stack_base + THREAD_STACK_SIZE;
+    boot->pml4 = vmm_kernel_pml4();
     fxsave_to(boot->fxsave);
     enqueue_thread(boot);
+    arch_set_kernel_stack(boot->kernel_stack_top);
 
     scheduler_ready = 1;
     thread_create(idle_thread, 0);
     serial_print("[SCHED] initialized\n");
 }
 
-struct thread *thread_create(thread_entry_t entry, void *arg) {
+static struct thread *thread_create_with_pml4(thread_entry_t entry, void *arg, uint64_t pml4) {
     uint64_t flags = irq_save();
     struct thread *thread;
     uint64_t *stack;
@@ -172,14 +201,26 @@ struct thread *thread_create(thread_entry_t entry, void *arg) {
 
     thread->rsp = rsp;
     thread->stack_base = stack_base;
+    thread->kernel_stack_top = (uint64_t)stack_base + THREAD_STACK_SIZE;
+    thread->pml4 = pml4;
     thread->id = next_thread_id++;
     thread->state = THREAD_READY;
 
     fxsave_to(thread->fxsave);
+    map_kernel_range(pml4, (uint64_t)thread, sizeof(*thread));
+    map_kernel_range(pml4, (uint64_t)stack_base, THREAD_STACK_SIZE);
     enqueue_thread(thread);
 
     irq_restore(flags);
     return thread;
+}
+
+struct thread *thread_create(thread_entry_t entry, void *arg) {
+    return thread_create_with_pml4(entry, arg, vmm_kernel_pml4());
+}
+
+struct thread *thread_create_process(thread_entry_t entry, void *arg, uint64_t pml4) {
+    return thread_create_with_pml4(entry, arg, pml4);
 }
 
 void sched_yield(void) {
@@ -218,4 +259,10 @@ uint32_t sched_current_thread_id(void) {
     if (current_thread == 0)
         return 0;
     return current_thread->id;
+}
+
+uint64_t sched_current_kernel_stack(void) {
+    if (current_thread == 0)
+        return 0;
+    return current_thread->kernel_stack_top;
 }
