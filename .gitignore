@@ -1,7 +1,13 @@
-# Binaries
+# Build output
 bin/
 *.bin
 *.img
+*.o
+*.a
+*.elf
+
+# Test binaries (no extension)
+userspace/libc/test
 
 # Logs and temps
 *.log

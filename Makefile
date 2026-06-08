@@ -1,14 +1,13 @@
-CC      = gcc
-CFLAGS  = -m64 -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
-           -mno-red-zone -nostdlib -nostdinc -O2 -Wall -Wextra \
-           -Isrc/drivers -Isrc/kernel
+CC     = gcc
+CFLAGS = -std=gnu99 -ffreestanding -fno-pic -fno-stack-protector -m64 \
+         -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
+         -Wall -Wextra -O2 -Isrc/kernel -Isrc/drivers
 
-NASM    = nasm
-AS_BIN  = -f bin
-AS_ELF  = -f elf64
+AS      = nasm
+ASFLAGS = -f elf64
 
 LD      = ld
-LDFLAGS = -T linker.ld -nostdlib -z noexecstack
+LDFLAGS = -nostdlib -z noexecstack -T src/kernel/linker.ld
 
 BIN = bin
 
@@ -19,52 +18,60 @@ all: $(BIN)/mominos.img
 $(BIN):
 	mkdir -p $(BIN)
 
-# Stage 1 MBR
+# --- Bootloader ---
+
 $(BIN)/boot_mbr.bin: src/boot/boot_mbr.asm | $(BIN)
-	$(NASM) $(AS_BIN) $< -o $@
+	$(AS) -f bin $< -o $@
 
-# Stage 2 loader (padded to 32KB so kernel lands at 0x10000)
 $(BIN)/boot_loader.bin: src/boot/boot_loader.asm | $(BIN)
-	$(NASM) $(AS_BIN) $< -o $@
+	$(AS) -f bin $< -o $@
 
+# Pad stage 2 to exactly 32KB so the kernel lands at 0x10000 in memory.
+# MBR loads 128 sectors (64KB) from LBA 1 to 0x8000:
+#   0x8000-0xFFFF = stage 2 (32KB padded)
+#   0x10000+      = kernel binary
 $(BIN)/boot_loader_padded.bin: $(BIN)/boot_loader.bin
 	cp $< $@
 	truncate -s 32768 $@
 
-# Kernel assembly entry stub
-$(BIN)/kernel_entry.o: src/kernel/kernel_entry.asm | $(BIN)
-	$(NASM) $(AS_ELF) $< -o $@
+# --- Kernel ---
 
-# Kernel C files
-$(BIN)/kmain.o: src/kernel/kmain.c | $(BIN)
+C_SRCS   = src/kernel/kmain.c src/kernel/pmm.c \
+            src/drivers/serial.c src/drivers/vga.c
+ASM_SRCS = src/kernel/kernel_entry.asm
+
+C_OBJS   = $(C_SRCS:.c=.o)
+ASM_OBJS = $(ASM_SRCS:.asm=.o)
+OBJS     = $(ASM_OBJS) $(C_OBJS)
+
+%.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BIN)/serial.o: src/drivers/serial.c | $(BIN)
-	$(CC) $(CFLAGS) -c $< -o $@
+%.o: %.asm
+	$(AS) $(ASFLAGS) $< -o $@
 
-$(BIN)/vga.o: src/drivers/vga.c | $(BIN)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Link kernel ELF then flatten to binary
-KERNEL_OBJS = $(BIN)/kernel_entry.o $(BIN)/kmain.o $(BIN)/serial.o $(BIN)/vga.o
-
-$(BIN)/kernel.elf: $(KERNEL_OBJS) linker.ld
-	$(LD) $(LDFLAGS) $(KERNEL_OBJS) -o $@
+$(BIN)/kernel.elf: $(OBJS) src/kernel/linker.ld | $(BIN)
+	$(LD) $(LDFLAGS) $(OBJS) -o $@
 
 $(BIN)/kernel.bin: $(BIN)/kernel.elf
 	objcopy -O binary $< $@
 
-# Final disk image: MBR + stage2 (padded to 32KB) + kernel
+# --- Disk image ---
+# Pad to exactly 1.44MB (floppy geometry: 80 cylinders x 2 heads x 18 sectors x 512B).
+# Floppy BIOS rejects reads to sectors beyond the image size.
+
 $(BIN)/mominos.img: $(BIN)/boot_mbr.bin $(BIN)/boot_loader_padded.bin $(BIN)/kernel.bin
 	cat $^ > $@
+	truncate -s 1474560 $@
+
+# --- Run ---
 
 run: $(BIN)/mominos.img
 	qemu-system-x86_64 \
-		-drive file=$<,format=raw,index=0,media=disk \
+		-fda $< \
 		-serial stdio \
-		-no-reboot \
-		-no-shutdown \
-		-d int,cpu_reset 2>/dev/null
+		-display none \
+		-no-reboot -no-shutdown
 
 clean:
-	rm -rf $(BIN)
+	rm -f $(OBJS) $(BIN)/*.bin $(BIN)/*.img $(BIN)/*.elf
