@@ -39,7 +39,7 @@ $(BIN)/boot_loader_padded.bin: $(BIN)/boot_loader.bin
 C_SRCS   = src/kernel/kmain.c src/kernel/pmm.c src/kernel/vmm.c src/kernel/kheap.c \
             src/kernel/sched.c src/kernel/idt.c \
             src/drivers/serial.c src/drivers/vga.c src/drivers/pic.c \
-            src/drivers/timer.c src/drivers/keyboard.c
+            src/drivers/timer.c src/drivers/keyboard.c src/drivers/ata.c
 ASM_SRCS = src/kernel/kernel_entry.asm src/kernel/isr.asm src/kernel/switch.asm
 
 C_OBJS   = $(C_SRCS:.c=.o)
@@ -66,11 +66,15 @@ $(BIN)/mominos.img: $(BIN)/boot_mbr.bin $(BIN)/boot_loader_padded.bin $(BIN)/ker
 	cat $^ > $@
 	truncate -s 1474560 $@
 
+$(BIN)/disk.img: | $(BIN)
+	truncate -s 64M $@
+
 # --- Run ---
 
-run: $(BIN)/mominos.img
+run: $(BIN)/mominos.img $(BIN)/disk.img
 	qemu-system-x86_64 \
-		-fda $< \
+		-drive file=$<,format=raw,if=floppy \
+		-drive file=$(BIN)/disk.img,format=raw,if=ide \
 		-m 512M \
 		-serial stdio \
 		-display none \

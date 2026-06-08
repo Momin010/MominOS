@@ -8,6 +8,7 @@
 #include "keyboard.h"
 #include "pic.h"
 #include "timer.h"
+#include "ata.h"
 
 static void print_worker(void *arg) {
     char c = (char)(uint64_t)arg;
@@ -51,16 +52,8 @@ void kmain(void) {
     serial_print("\n");
 
     kheap_init();
-    if (!kheap_self_test()) {
-        serial_print("[KHEAP] self-test failed\n");
-        while (1)
-            __asm__ volatile ("cli; hlt");
-    }
 
     sched_init();
-    thread_create(print_worker, (void *)(uint64_t)'A');
-    thread_create(print_worker, (void *)(uint64_t)'B');
-    thread_create(busy_worker, 0);
 
     idt_init();
     pic_remap();
@@ -71,6 +64,15 @@ void kmain(void) {
     pic_clear_mask(1);
     __asm__ volatile ("sti");
     serial_print("[IRQ] enabled\n");
+
+    if (ata_init()) {
+        if (!ata_self_test())
+            serial_print("[ATA] self-test failed\n");
+    }
+
+    thread_create(print_worker, (void *)(uint64_t)'A');
+    thread_create(print_worker, (void *)(uint64_t)'B');
+    thread_create(busy_worker, 0);
 
     vga_clear();
     vga_set_color(0x0A);
