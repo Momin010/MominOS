@@ -2,6 +2,9 @@
 #include "vga.h"
 #include "pmm.h"
 #include "idt.h"
+#include "keyboard.h"
+#include "pic.h"
+#include "timer.h"
 
 void kmain(void) {
     serial_putc('2');
@@ -17,6 +20,14 @@ void kmain(void) {
     serial_print("\n");
 
     idt_init();
+    pic_remap();
+    pic_mask_all();
+    timer_init(100);
+    keyboard_init();
+    pic_clear_mask(0);
+    pic_clear_mask(1);
+    __asm__ volatile ("sti");
+    serial_print("[IRQ] enabled\n");
 
     vga_clear();
     vga_set_color(0x0A);

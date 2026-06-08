@@ -1,5 +1,8 @@
 #include "idt.h"
 #include "serial.h"
+#include "keyboard.h"
+#include "pic.h"
+#include "timer.h"
 
 #define IDT_ENTRIES 256
 #define KERNEL_CODE_SELECTOR 0x08
@@ -83,6 +86,18 @@ void idt_init(void) {
 }
 
 void isr_handler(struct isr_frame *frame) {
+    if (frame->vector >= PIC_MASTER_OFFSET && frame->vector < PIC_MASTER_OFFSET + 16) {
+        uint8_t irq = frame->vector - PIC_MASTER_OFFSET;
+
+        if (irq == 0)
+            timer_irq();
+        else if (irq == 1)
+            keyboard_irq();
+
+        pic_send_eoi(irq);
+        return;
+    }
+
     serial_print("\n[ISR] vector ");
     serial_print_hex(frame->vector);
 
