@@ -88,6 +88,10 @@ void pmm_init(void) {
     serial_print("\n");
 }
 
+void pmm_reserve(uint64_t base, uint64_t length) {
+    mark_region(base, length, 1);
+}
+
 uint64_t pmm_alloc(void) {
     for (uint64_t i = 0; i < MAX_PAGES; i++) {
         if (!bitmap_test(i)) {

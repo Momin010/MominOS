@@ -1,6 +1,7 @@
 #include "serial.h"
 #include "vga.h"
 #include "pmm.h"
+#include "vmm.h"
 #include "idt.h"
 #include "keyboard.h"
 #include "pic.h"
@@ -17,6 +18,11 @@ void kmain(void) {
     serial_print("[PMM] initialized\n");
     serial_print("[PMM] free pages: ");
     serial_print_hex(pmm_free_pages());
+    serial_print("\n");
+
+    vmm_init();
+    serial_print("[VMM] phys(0x10000)=");
+    serial_print_hex(vmm_phys(0x10000));
     serial_print("\n");
 
     idt_init();
