@@ -36,9 +36,9 @@ $(BIN)/boot_loader_padded.bin: $(BIN)/boot_loader.bin
 
 # --- Kernel ---
 
-C_SRCS   = src/kernel/kmain.c src/kernel/pmm.c \
+C_SRCS   = src/kernel/kmain.c src/kernel/pmm.c src/kernel/idt.c \
             src/drivers/serial.c src/drivers/vga.c
-ASM_SRCS = src/kernel/kernel_entry.asm
+ASM_SRCS = src/kernel/kernel_entry.asm src/kernel/isr.asm
 
 C_OBJS   = $(C_SRCS:.c=.o)
 ASM_OBJS = $(ASM_SRCS:.asm=.o)
