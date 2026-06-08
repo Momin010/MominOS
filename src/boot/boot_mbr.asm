@@ -1,7 +1,6 @@
 [BITS 16]
 [ORG 0x7C00]
-jmp short start
-nop
+
 start:
     cli
     xor ax, ax
@@ -10,45 +9,55 @@ start:
     mov ss, ax
     mov sp, 0x7C00
     sti
-    mov [BOOT_DRIVE], dl
-    mov si, LOADING_MSG
-    call print_string
-    mov bx, 0x8000
-    mov dh, 15
-    mov dl, [BOOT_DRIVE]
-    call load_disk
-    jmp 0x0000:0x8000
-load_disk:
-    push dx
-    mov ah, 0x02
-    mov al, dh
-    mov ch, 0x00
-    mov dh, 0x00
-    mov cl, 0x02
+
+    mov [0x500], dl         ; save boot drive for stage 2
+
+    mov si, MSG_LOAD
+    call print
+
+    ; LBA read: 64 sectors from LBA 1 to 0x0800:0x0000 (= 0x8000)
+    mov word  [dap.count],   64
+    mov word  [dap.offset],  0x0000
+    mov word  [dap.segment], 0x0800
+    mov dword [dap.lba_lo],  1
+    mov dword [dap.lba_hi],  0
+
+    mov dl, [0x500]
+    mov si, dap
+    mov ah, 0x42
     int 0x13
-    jc disk_error
-    pop dx
-    cmp dh, al
-    jne disk_error
-    ret
-disk_error:
-    mov si, DISK_ERR_MSG
-    call print_string
-    jmp $
-print_string:
-    pusha
-.loop:
+    jc  .disk_err
+
+    jmp 0x0000:0x8000
+
+.disk_err:
+    mov si, MSG_ERR
+    call print
+    cli
+    hlt
+
+print:
     lodsb
     or al, al
     jz .done
     mov ah, 0x0E
     int 0x10
-    jmp .loop
+    jmp print
 .done:
-    popa
     ret
-BOOT_DRIVE db 0
-LOADING_MSG db 'Loading MominOS...', 13, 10, 0
-DISK_ERR_MSG db 'Disk read error!', 0
+
+MSG_LOAD db 'MominOS loading...', 13, 10, 0
+MSG_ERR  db 'Disk read failed!', 0
+
+; Disk Address Packet
+dap:
+    db 0x10
+    db 0
+.count:   dw 64
+.offset:  dw 0
+.segment: dw 0x0800
+.lba_lo:  dd 1
+.lba_hi:  dd 0
+
 times 510-($-$$) db 0
 dw 0xAA55
