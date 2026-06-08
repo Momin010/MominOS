@@ -3,6 +3,7 @@
 #include "keyboard.h"
 #include "pic.h"
 #include "timer.h"
+#include "sched.h"
 
 #define IDT_ENTRIES 256
 #define KERNEL_CODE_SELECTOR 0x08
@@ -95,6 +96,8 @@ void isr_handler(struct isr_frame *frame) {
             keyboard_irq();
 
         pic_send_eoi(irq);
+        if (irq == 0)
+            sched_after_irq();
         return;
     }
 

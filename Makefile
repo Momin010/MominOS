@@ -36,10 +36,11 @@ $(BIN)/boot_loader_padded.bin: $(BIN)/boot_loader.bin
 
 # --- Kernel ---
 
-C_SRCS   = src/kernel/kmain.c src/kernel/pmm.c src/kernel/vmm.c src/kernel/idt.c \
+C_SRCS   = src/kernel/kmain.c src/kernel/pmm.c src/kernel/vmm.c src/kernel/kheap.c \
+            src/kernel/sched.c src/kernel/idt.c \
             src/drivers/serial.c src/drivers/vga.c src/drivers/pic.c \
             src/drivers/timer.c src/drivers/keyboard.c
-ASM_SRCS = src/kernel/kernel_entry.asm src/kernel/isr.asm
+ASM_SRCS = src/kernel/kernel_entry.asm src/kernel/isr.asm src/kernel/switch.asm
 
 C_OBJS   = $(C_SRCS:.c=.o)
 ASM_OBJS = $(ASM_SRCS:.asm=.o)
@@ -70,6 +71,7 @@ $(BIN)/mominos.img: $(BIN)/boot_mbr.bin $(BIN)/boot_loader_padded.bin $(BIN)/ker
 run: $(BIN)/mominos.img
 	qemu-system-x86_64 \
 		-fda $< \
+		-m 512M \
 		-serial stdio \
 		-display none \
 		-no-reboot -no-shutdown

@@ -39,10 +39,10 @@ isr_common:
     push r15
 
     mov rdi, rsp
-    mov [isr_saved_rsp], rsp
+    mov rbp, rsp
     and rsp, -16
     call isr_handler
-    mov rsp, [isr_saved_rsp]
+    mov rsp, rbp
 
     pop r15
     pop r14
@@ -101,10 +101,6 @@ ISR_NOERR 31
 ISR_NOERR i
 %assign i i+1
 %endrep
-
-section .data
-align 8
-isr_saved_rsp: dq 0
 
 isr_stub_table:
 %assign i 0

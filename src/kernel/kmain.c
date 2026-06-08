@@ -2,10 +2,35 @@
 #include "vga.h"
 #include "pmm.h"
 #include "vmm.h"
+#include "kheap.h"
+#include "sched.h"
 #include "idt.h"
 #include "keyboard.h"
 #include "pic.h"
 #include "timer.h"
+
+static void print_worker(void *arg) {
+    char c = (char)(uint64_t)arg;
+    uint64_t last = 0;
+
+    while (1) {
+        uint64_t ticks = timer_ticks();
+        uint64_t bucket = ticks / 25;
+
+        if (bucket != last) {
+            serial_putc(c);
+            last = bucket;
+            sched_yield();
+        }
+    }
+}
+
+static void busy_worker(void *arg) {
+    volatile uint64_t counter = (uint64_t)arg;
+
+    while (1)
+        counter++;
+}
 
 void kmain(void) {
     serial_putc('2');
@@ -25,6 +50,18 @@ void kmain(void) {
     serial_print_hex(vmm_phys(0x10000));
     serial_print("\n");
 
+    kheap_init();
+    if (!kheap_self_test()) {
+        serial_print("[KHEAP] self-test failed\n");
+        while (1)
+            __asm__ volatile ("cli; hlt");
+    }
+
+    sched_init();
+    thread_create(print_worker, (void *)(uint64_t)'A');
+    thread_create(print_worker, (void *)(uint64_t)'B');
+    thread_create(busy_worker, 0);
+
     idt_init();
     pic_remap();
     pic_mask_all();
@@ -43,7 +80,7 @@ void kmain(void) {
     vga_print("Serial: COM1 active\n");
 
     serial_print("[MominOS] VGA initialized\n");
-    serial_print("[MominOS] Halting (no scheduler yet)\n");
+    serial_print("[MominOS] Scheduler running\n");
 
     while (1)
         __asm__ volatile ("hlt");
