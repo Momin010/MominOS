@@ -1,0 +1,3 @@
+{"text": "test prompt", "response": "test response"}
+{"text": "null pointer fault", "response": "check the pointer"}
+{"text": "page fault at 0x401000", "response": "verify memory mapping"}
