@@ -275,6 +275,27 @@ struct thread *sched_current_thread(void) {
     return current_thread;
 }
 
+struct thread *sched_find_thread(uint32_t id) {
+    uint64_t flags = irq_save();
+    struct thread *t = current_thread;
+
+    if (t == 0) {
+        irq_restore(flags);
+        return 0;
+    }
+
+    do {
+        if (t->id == id) {
+            irq_restore(flags);
+            return t;
+        }
+        t = t->next;
+    } while (t != current_thread);
+
+    irq_restore(flags);
+    return 0;
+}
+
 void sched_block(void) {
     uint64_t flags = irq_save();
 
@@ -282,6 +303,15 @@ void sched_block(void) {
     need_resched = 1;
     schedule_locked();
     irq_restore(flags);
+}
+
+void sched_block_locked(void) {
+    /* caller already holds interrupts disabled. schedule_locked() will
+       restore IF only inside switch_context via the resumed thread's
+       saved flags; on return here interrupts remain disabled. */
+    current_thread->state = THREAD_BLOCKED;
+    need_resched = 1;
+    schedule_locked();
 }
 
 void sched_wake(struct thread *thread) {

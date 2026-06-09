@@ -65,12 +65,14 @@ static struct ext2_group_desc *groups;
 static int mounted;
 
 static int name_eq(const char *a, const char *b, size_t len) {
+    /* b may point into the middle of a path string (e.g. "bin/sh"), so do not
+       test for a trailing NUL here. The caller already compared lengths. */
     for (size_t i = 0; i < len; i++) {
         if (a[i] != b[i])
             return 0;
     }
 
-    return b[len] == 0;
+    return 1;
 }
 
 static int read_block(uint32_t block, void *buffer) {

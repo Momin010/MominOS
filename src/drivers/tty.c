@@ -88,12 +88,13 @@ size_t tty_read(char *buf, size_t size) {
 
     flags = irq_save();
 
-    /* block until at least one complete line is available */
+    /* block until at least one complete line is available. IRQs stay
+       disabled across the check and the block transition so a line
+       arriving from the keyboard IRQ cannot wake us before we are
+       actually BLOCKED (which would lose the wake and hang). */
     while (lines == 0) {
         waiter = sched_current_thread();
-        irq_restore(flags);
-        sched_block();
-        flags = irq_save();
+        sched_block_locked();
     }
 
     /* copy out at most one line worth of committed bytes */

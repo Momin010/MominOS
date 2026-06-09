@@ -46,10 +46,16 @@ uint64_t sched_current_kernel_stack(void);
 
 /* current running thread (for syscalls: fd table, pid, cwd) */
 struct thread *sched_current_thread(void);
+/* find a thread in the ring by id, or 0 if absent. */
+struct thread *sched_find_thread(uint32_t id);
 
 /* block the current thread; an event source must call sched_wake() on it.
    call with interrupts enabled; it disables them around the block transition. */
 void sched_block(void);
+/* block the current thread, assuming interrupts are ALREADY disabled by
+   the caller. returns with interrupts still disabled. lets a caller do an
+   atomic "check condition then block" without losing a wake. */
+void sched_block_locked(void);
 /* mark a thread READY if it was BLOCKED. safe from IRQ context. */
 void sched_wake(struct thread *thread);
 

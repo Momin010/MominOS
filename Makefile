@@ -72,15 +72,34 @@ $(BIN)/mominos.img: $(BIN)/boot_mbr.bin $(BIN)/boot_loader_padded.bin $(BIN)/ker
 	cat $^ > $@
 	truncate -s 1474560 $@
 
-$(BIN)/init: userspace/init.c | $(BIN)
-	$(CC) $(USER_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start $< -o $@
+# --- Userspace ---
+# crt0 + libc, then link each program statically at 0x400000 with no PIE.
 
-$(BIN)/disk.img: Makefile $(BIN)/init | $(BIN)
+LIBC_C_OBJS = userspace/libc/string.o userspace/libc/stdlib.o userspace/libc/stdio.o
+LIBC_CRT0   = userspace/libc/crt0.o
+USER_LDFLAGS = -nostdlib -no-pie -Wl,-z,noexecstack -Wl,--build-id=none -Wl,-Ttext=0x400000 -Wl,-e,_start
+
+userspace/libc/%.o: userspace/libc/%.c
+	$(CC) $(USER_CFLAGS) -Iuserspace/libc -c $< -o $@
+
+userspace/libc/crt0.o: userspace/libc/crt0.asm
+	$(AS) $(ASFLAGS) $< -o $@
+
+# libc-linked programs: crt0 + program + libc objects.
+USER_PROGS = init sh ls cat echo argtest
+USER_BINS  = $(addprefix $(BIN)/,$(USER_PROGS))
+
+$(BIN)/%: userspace/%.c $(LIBC_CRT0) $(LIBC_C_OBJS) | $(BIN)
+	$(CC) $(USER_CFLAGS) -Iuserspace/libc $(USER_LDFLAGS) \
+		$(LIBC_CRT0) $< $(LIBC_C_OBJS) -o $@
+
+$(BIN)/disk.img: Makefile $(USER_BINS) | $(BIN)
 	rm -rf $(BIN)/fsroot
-	mkdir -p $(BIN)/fsroot
+	mkdir -p $(BIN)/fsroot/bin
 	printf 'hello from MominOS ext2\n' > $(BIN)/fsroot/hello.txt
 	dd if=/dev/zero of=$(BIN)/fsroot/big.bin bs=1M count=5 status=none
 	cp $(BIN)/init $(BIN)/fsroot/init
+	cp $(USER_BINS) $(BIN)/fsroot/bin/
 	rm -f $@
 	mke2fs -q -F -t ext2 -b 4096 -d $(BIN)/fsroot $@ 64M
 

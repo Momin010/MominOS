@@ -6,6 +6,7 @@
 #define IA32_STAR           0xC0000081
 #define IA32_LSTAR          0xC0000082
 #define IA32_FMASK          0xC0000084
+#define IA32_GS_BASE        0xC0000101
 #define IA32_KERNEL_GS_BASE 0xC0000102
 
 #define EFER_SCE (1ULL << 0)
@@ -109,6 +110,11 @@ void arch_init(void) {
     __asm__ volatile ("ltr %0" : : "r"((uint16_t)0x28));
 
     wrmsr(IA32_KERNEL_GS_BASE, (uint64_t)&percpu);
+    /* Single-CPU: pin GS base to percpu in both ring 0 and ring 3 and drop
+       swapgs entirely. swapgs relies on a strict ring3<->ring0 pairing that
+       context-switching mid-syscall (with a second user process) violates,
+       desyncing GS_BASE/KERNEL_GS_BASE and corrupting the syscall stack load. */
+    wrmsr(IA32_GS_BASE, (uint64_t)&percpu);
     wrmsr(IA32_STAR, ((uint64_t)KERNEL_CS << 32) | ((uint64_t)KERNEL_DS << 48));
     wrmsr(IA32_LSTAR, (uint64_t)syscall_entry);
     wrmsr(IA32_FMASK, 0x200);

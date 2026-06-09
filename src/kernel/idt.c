@@ -113,6 +113,15 @@ void isr_handler(struct isr_frame *frame) {
     serial_print_hex(frame->rip);
     serial_print(" err=");
     serial_print_hex(frame->error_code);
+    serial_print(" cs=");
+    serial_print_hex(frame->cs);
+    serial_print(" rflags=");
+    serial_print_hex(frame->rflags);
+    {
+        struct thread *t = sched_current_thread();
+        serial_print(" tid=");
+        serial_print_hex(t ? t->id : 0xDEAD);
+    }
 
     if (frame->vector == 14) {
         uint64_t cr2;
@@ -120,6 +129,15 @@ void isr_handler(struct isr_frame *frame) {
         serial_print(" cr2=");
         serial_print_hex(cr2);
     }
+
+    serial_print("\n[ISR] rax="); serial_print_hex(frame->rax);
+    serial_print(" rbx="); serial_print_hex(frame->rbx);
+    serial_print(" rcx="); serial_print_hex(frame->rcx);
+    serial_print(" rdx="); serial_print_hex(frame->rdx);
+    serial_print("\n[ISR] rsi="); serial_print_hex(frame->rsi);
+    serial_print(" rdi="); serial_print_hex(frame->rdi);
+    serial_print(" rbp="); serial_print_hex(frame->rbp);
+    serial_print(" r8="); serial_print_hex(frame->r8);
 
     serial_print("\n[ISR] halted\n");
 

@@ -23,7 +23,7 @@ user_enter:
     iretq
 
 syscall_entry:
-    swapgs
+    ; GS base is pinned to percpu in both rings (no swapgs needed, single CPU)
     mov gs:[8], rsp
     mov rsp, gs:[0]
 
@@ -46,5 +46,4 @@ syscall_entry:
     pop rdi
 
     mov rsp, rdi
-    swapgs
     o64 sysret

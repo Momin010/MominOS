@@ -24,16 +24,33 @@ static void tty_feed_str(const char *s) {
     }
 }
 
+/* Boot self-test driver: once the shell is up and blocked on stdin, feed
+   it a canned command sequence so an automated `make run` demonstrates
+   the whole read -> tokenize -> spawn -> waitpid chain with no typing.
+   Each command gets time to run before the next line is delivered. */
 static void boot_input_test(void *arg) {
     (void)arg;
+    const char *cmds[] = {
+        "ls /\n",
+        "cat hello.txt\n",
+        "echo hi from shell\n",
+        "ls /bin\n",
+        0,
+    };
     uint64_t start = timer_ticks();
 
-    /* let /init reach its blocking read() before we deliver input */
-    while (timer_ticks() - start < 100)
+    /* let the shell reach its first blocking read() */
+    while (timer_ticks() - start < 150)
         sched_yield();
 
-    serial_print("[TEST] feeding line to tty\n");
-    tty_feed_str("hello tty\n");
+    for (int i = 0; cmds[i] != 0; i++) {
+        serial_print("[TEST] >> ");
+        serial_print(cmds[i]);
+        tty_feed_str(cmds[i]);
+        start = timer_ticks();
+        while (timer_ticks() - start < 100)
+            sched_yield();
+    }
 
     while (1)
         sched_yield();
@@ -77,8 +94,9 @@ void kmain(void) {
         if (vfs_mount_root()) {
             if (!vfs_self_test())
                 serial_print("[VFS] self-test failed\n");
-            if (!elf_spawn("/init"))
-                serial_print("[ELF] spawn failed\n");
+            /* launch the interactive shell as the first user process */
+            if (elf_load_process("/bin/sh", 0, 0) == 0)
+                serial_print("[ELF] shell spawn failed\n");
         }
     }
 

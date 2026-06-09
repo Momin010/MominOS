@@ -5,10 +5,13 @@ bin/
 *.o
 *.a
 *.elf
-
+gcpkey.json
 # Test binaries (no extension)
 userspace/libc/test
 
 # Logs and temps
 *.log
 *.tmp
+
+# Archives
+*.tgz
