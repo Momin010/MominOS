@@ -41,7 +41,21 @@ uint64_t ext2_inode_size(const struct ext2_inode *inode);
 uint16_t ext2_inode_mode(const struct ext2_inode *inode);
 
 /* Create `path` as a new regular file containing `size` bytes from `data`.
-   Direct blocks only (max 12 * block_size). Returns inode number, or 0. */
+   Returns inode number, or 0. Supports direct + single-indirect blocks. */
 uint32_t ext2_create(const char *path, const void *data, size_t size);
+
+/* Create `path` as an empty regular file (size 0). Fails if it exists.
+   Returns the new inode number, or 0. */
+uint32_t ext2_create_empty(const char *path);
+
+/* Write `size` bytes from `data` into inode at byte `offset`, growing the
+   file (allocating data + single-indirect blocks) as needed and updating
+   i_size / i_blocks. Returns bytes written, or 0 on failure. */
+size_t ext2_write(uint32_t inode_num, uint64_t offset, const void *data, size_t size);
+
+/* Truncate the file to `new_size`, freeing any now-unused data and indirect
+   blocks and updating bitmaps, free counts, i_size and i_blocks. Currently
+   only supports truncating down to <= current size. Returns 1 on success. */
+int ext2_truncate(uint32_t inode_num, uint64_t new_size);
 
 #endif
