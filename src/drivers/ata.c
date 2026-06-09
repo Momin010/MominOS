@@ -26,8 +26,16 @@
 #define ATA_CMD_IDENTIFY 0xEC
 #define ATA_CMD_FLUSH    0xE7
 
-#define ATA_POLL_LIMIT 100000ULL
-#define ATA_YIELD_EVERY 1024ULL
+/* Spin-poll the status register tightly: on emulated (and real) hardware the
+   drive clears BSY / raises DRQ within microseconds, so a tight inb() loop
+   returns almost instantly. Only after an enormous spin count -- a sign the
+   device is genuinely stalled -- do we start yielding the CPU. Yielding early
+   was catastrophic: syscalls run with interrupts off, so a yield handed the
+   CPU to the idle thread which slept until the next 10ms timer tick, turning
+   every sector wait into a 10ms stall (a single binary load cost ~1.8s). */
+#define ATA_POLL_LIMIT        10000000ULL
+#define ATA_SPIN_BEFORE_YIELD 100000ULL
+#define ATA_YIELD_EVERY       100000ULL
 #define ATA_TEST_LBA 2048U
 #define ATA_STREAM_SECTORS 4096U
 
@@ -76,7 +84,7 @@ static int wait_not_busy(void) {
         if ((status & ATA_SR_BSY) == 0)
             return 1;
 
-        if ((i % ATA_YIELD_EVERY) == 0)
+        if (i >= ATA_SPIN_BEFORE_YIELD && (i % ATA_YIELD_EVERY) == 0)
             sched_yield();
     }
 
@@ -96,7 +104,7 @@ static int wait_drq(void) {
         if ((status & ATA_SR_BSY) == 0 && (status & ATA_SR_DRQ))
             return 1;
 
-        if ((i % ATA_YIELD_EVERY) == 0)
+        if (i >= ATA_SPIN_BEFORE_YIELD && (i % ATA_YIELD_EVERY) == 0)
             sched_yield();
     }
 

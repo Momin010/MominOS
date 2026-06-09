@@ -279,10 +279,11 @@ struct thread *elf_load_process(const char *path, char *const argv[], struct thr
     if (argv != 0) {
         while (argv[argc] != 0 && argc < MAX_ARGV)
             argc++;
-        start->stack = build_argv_stack(top_phys, argv, argc);
-    } else {
-        start->stack = USER_STACK_TOP - 8;
     }
+    /* argc==0 still builds a valid, 16-byte-aligned frame: argc=0 at [rsp]
+       and a NULL argv terminator, matching the System V ABI so crt0 reads a
+       real argc/argv and userspace SSE on the entry frame stays aligned. */
+    start->stack = build_argv_stack(top_phys, argv, argc);
 
     map_kernel_object(pml4, start, sizeof(*start));
 
