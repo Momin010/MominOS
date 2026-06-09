@@ -119,6 +119,10 @@ void isr_handler(struct isr_frame *frame) {
     serial_print_hex(frame->cs);
     serial_print(" rflags=");
     serial_print_hex(frame->rflags);
+    serial_print(" rsp=");
+    serial_print_hex(frame->rsp);
+    serial_print(" ss=");
+    serial_print_hex(frame->ss);
     {
         struct thread *t = sched_current_thread();
         serial_print(" tid=");
