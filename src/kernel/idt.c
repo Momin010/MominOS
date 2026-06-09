@@ -126,10 +126,13 @@ void isr_handler(struct isr_frame *frame) {
     }
 
     if (frame->vector == 14) {
-        uint64_t cr2;
+        uint64_t cr2, cr3;
         __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+        __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
         serial_print(" cr2=");
         serial_print_hex(cr2);
+        serial_print(" cr3=");
+        serial_print_hex(cr3);
     }
 
     serial_print("\n[ISR] halted\n");

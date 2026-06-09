@@ -13,21 +13,27 @@
 #include "arch.h"
 #include "elf.h"
 #include "tty.h"
+#include "memmap.h"
 
-void kmain(void) {
+void kmain(uint64_t mb_info_phys) {
     serial_putc('2');
     serial_init();
     serial_putc('3');
     serial_print("[MominOS] Kernel alive\n");
+
+    /* Parse the boot-protocol memory map into the architecture-neutral
+       mem_regions table before bringing up the physical allocator. */
+    memmap_parse_multiboot2(mb_info_phys);
+
     serial_print("[MominOS] About to init PMM\n");
 
-    pmm_init();
+    pmm_init(mem_regions, mem_region_count);
     serial_print("[PMM] initialized\n");
     serial_print("[PMM] free pages: ");
     serial_print_hex(pmm_free_pages());
     serial_print("\n");
 
-    vmm_init();
+    vmm_init(mem_regions, mem_region_count);
     serial_print("[VMM] phys(0x10000)=");
     serial_print_hex(vmm_phys(0x10000));
     serial_print("\n");

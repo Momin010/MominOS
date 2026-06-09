@@ -1,7 +1,10 @@
-ENTRY(kernel_start)
+ENTRY(_start)
 SECTIONS
 {
-    . = 0x10000;
+    . = 1M;
+    .multiboot : {
+        *(.multiboot)
+    }
     .text : {
         *(.text*)
     }
@@ -15,4 +18,5 @@ SECTIONS
         *(.bss*)
         *(COMMON)
     }
+    kernel_phys_end = .;
 }

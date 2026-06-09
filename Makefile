@@ -13,39 +13,23 @@ USER_CFLAGS = -nostdlib -ffreestanding -fno-pic -no-pie -m64 \
 
 BIN = bin
 
-.PHONY: all clean run
+.PHONY: all clean run run-iso iso
 
-all: $(BIN)/mominos.img
+all: $(BIN)/kernel.elf
 
 $(BIN):
 	mkdir -p $(BIN)
-
-# --- Bootloader ---
-
-$(BIN)/boot_mbr.bin: src/boot/boot_mbr.asm | $(BIN)
-	$(AS) -f bin $< -o $@
-
-$(BIN)/boot_loader.bin: src/boot/boot_loader.asm | $(BIN)
-	$(AS) -f bin $< -o $@
-
-# Pad stage 2 to exactly 32KB so the kernel lands at 0x10000 in memory.
-# MBR loads 128 sectors (64KB) from LBA 1 to 0x8000:
-#   0x8000-0xFFFF = stage 2 (32KB padded)
-#   0x10000+      = kernel binary
-$(BIN)/boot_loader_padded.bin: $(BIN)/boot_loader.bin
-	cp $< $@
-	truncate -s 32768 $@
 
 # --- Kernel ---
 
 C_SRCS   = src/kernel/kmain.c src/kernel/pmm.c src/kernel/vmm.c src/kernel/kheap.c \
             src/kernel/sched.c src/kernel/arch.c src/kernel/syscall.c \
-            src/kernel/elf.c src/kernel/idt.c \
+            src/kernel/elf.c src/kernel/idt.c src/kernel/memmap.c \
             src/fs/ext2.c src/fs/vfs.c \
             src/drivers/serial.c src/drivers/vga.c src/drivers/pic.c \
             src/drivers/timer.c src/drivers/keyboard.c src/drivers/ata.c \
             src/drivers/tty.c
-ASM_SRCS = src/kernel/kernel_entry.asm src/kernel/isr.asm src/kernel/switch.asm \
+ASM_SRCS = src/boot/multiboot_entry.asm src/kernel/isr.asm src/kernel/switch.asm \
            src/kernel/usermode.asm
 
 C_OBJS   = $(C_SRCS:.c=.o)
@@ -61,16 +45,18 @@ OBJS     = $(ASM_OBJS) $(C_OBJS)
 $(BIN)/kernel.elf: $(OBJS) src/kernel/linker.ld | $(BIN)
 	$(LD) $(LDFLAGS) $(OBJS) -o $@
 
-$(BIN)/kernel.bin: $(BIN)/kernel.elf
-	objcopy -O binary $< $@
+# --- Bootable ISO (GRUB + Multiboot2, BIOS) ---
+# The kernel ELF is the boot artifact: GRUB loads it via the multiboot2 command.
 
-# --- Disk image ---
-# Pad to exactly 1.44MB (floppy geometry: 80 cylinders x 2 heads x 18 sectors x 512B).
-# Floppy BIOS rejects reads to sectors beyond the image size.
+iso: $(BIN)/mominos.iso
 
-$(BIN)/mominos.img: $(BIN)/boot_mbr.bin $(BIN)/boot_loader_padded.bin $(BIN)/kernel.bin
-	cat $^ > $@
-	truncate -s 1474560 $@
+$(BIN)/mominos.iso: $(BIN)/kernel.elf src/boot/grub.cfg | $(BIN)
+	grub-file --is-x86-multiboot2 $(BIN)/kernel.elf
+	rm -rf $(BIN)/isodir
+	mkdir -p $(BIN)/isodir/boot/grub
+	cp $(BIN)/kernel.elf $(BIN)/isodir/boot/mominos.elf
+	cp src/boot/grub.cfg $(BIN)/isodir/boot/grub/grub.cfg
+	grub-mkrescue -o $@ $(BIN)/isodir
 
 # --- Userspace ---
 # crt0 + libc, then link each program statically at 0x400000 with no PIE.
@@ -103,16 +89,25 @@ $(BIN)/disk.img: Makefile $(USER_BINS) | $(BIN)
 	rm -f $@
 	mke2fs -q -F -t ext2 -b 4096 -d $(BIN)/fsroot $@ 64M
 
-# --- Run ---
+# qcow2 root disk, converted from the raw ext2 image. Presented to the guest
+# as a plain IDE disk, so the ATA driver mounts it unchanged.
+$(BIN)/disk.qcow2: $(BIN)/disk.img | $(BIN)
+	qemu-img convert -f raw -O qcow2 $< $@
 
-run: $(BIN)/mominos.img $(BIN)/disk.img
+# --- Run ---
+# One command boots the GRUB ISO with the qcow2 hard drive attached.
+
+run: run-iso
+
+run-iso: $(BIN)/mominos.iso $(BIN)/disk.qcow2
 	qemu-system-x86_64 \
-		-drive file=$<,format=raw,if=floppy \
-		-drive file=$(BIN)/disk.img,format=raw,if=ide \
+		-cdrom $(BIN)/mominos.iso \
+		-drive file=$(BIN)/disk.qcow2,format=qcow2,if=ide \
 		-m 512M \
 		-serial stdio \
 		-display none \
 		-no-reboot -no-shutdown
 
 clean:
-	rm -f $(OBJS) $(BIN)/*.bin $(BIN)/*.img $(BIN)/*.elf
+	rm -f $(OBJS) $(BIN)/*.bin $(BIN)/*.img $(BIN)/*.iso $(BIN)/*.qcow2 $(BIN)/*.elf
+	rm -rf $(BIN)/isodir $(BIN)/fsroot

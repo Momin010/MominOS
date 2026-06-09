@@ -1,5 +1,9 @@
 #include "pmm.h"
+#include "memmap.h"
 #include "serial.h"
+
+/* Provided by the linker: physical end of the loaded kernel image. */
+extern uint8_t kernel_phys_end[];
 
 #define PAGE_SIZE 4096
 #define MAX_PAGES (4ULL * 1024 * 1024 * 1024 / PAGE_SIZE)
@@ -43,24 +47,19 @@ static void mark_region(uint64_t base, uint64_t length, int used) {
     }
 }
 
-void pmm_init(void) {
+void pmm_init(const struct mem_region *regions, uint32_t count) {
     for (uint64_t i = 0; i < BITMAP_SIZE; i++)
         bitmap[i] = 0xFF;
     free_pages = 0;
 
-    uint16_t *count_ptr = (uint16_t *)0x5FF8;
-    uint16_t entry_count = *count_ptr;
-    uint8_t *entries = (uint8_t *)0x6000;
-
-    serial_print("[PMM] E820 entry count: ");
-    serial_print_hex(entry_count);
+    serial_print("[PMM] memory regions: ");
+    serial_print_hex(count);
     serial_print("\n");
 
-    for (uint16_t i = 0; i < entry_count; i++) {
-        uint64_t *entry = (uint64_t *)(entries + i * 24);
-        uint64_t base = entry[0];
-        uint64_t length = entry[1];
-        uint32_t type = *(uint32_t *)&entry[2];
+    for (uint32_t i = 0; i < count; i++) {
+        uint64_t base = regions[i].base;
+        uint64_t length = regions[i].length;
+        uint32_t type = regions[i].type;
 
         serial_print("[PMM] Entry ");
         serial_print_hex(i);
@@ -72,13 +71,20 @@ void pmm_init(void) {
         serial_print_hex(type);
         serial_print("\n");
 
-        if (type == 1) {
+        if (type == MEM_TYPE_AVAILABLE) {
             mark_region(base, length, 0);
             total_pages += length / PAGE_SIZE;
         }
     }
 
+    /* Reserve low memory (IVT/BIOS/boot page tables) and the loaded kernel
+       image itself (now linked at 1MB, so it sits inside a usable region).
+       Round the kernel end up to a full page: mark_region truncates the end
+       down, which would otherwise leave the kernel's final partial page free
+       and let pmm_alloc hand out memory that overlaps the kernel image. */
+    uint64_t kend = ((uint64_t)kernel_phys_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
     mark_region(0, 0x100000, 1);
+    mark_region(0x100000, kend - 0x100000, 1);
 
     serial_print("[PMM] Total usable pages: ");
     serial_print_hex(total_pages);

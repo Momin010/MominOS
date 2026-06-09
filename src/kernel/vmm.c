@@ -1,5 +1,6 @@
 #include "vmm.h"
 #include "pmm.h"
+#include "memmap.h"
 #include "serial.h"
 
 #define PAGE_SIZE 4096
@@ -157,21 +158,12 @@ static void direct_map_region(uint64_t base, uint64_t length) {
         map_2m(addr, addr, VMM_PRESENT | VMM_WRITABLE);
 }
 
-void vmm_init(void) {
-    uint16_t *count_ptr = (uint16_t *)0x5FF8;
-    uint16_t entry_count = *count_ptr;
-    uint8_t *entries = (uint8_t *)0x6000;
-
+void vmm_init(const struct mem_region *regions, uint32_t count) {
     kernel_pml4 = alloc_table();
 
-    for (uint16_t i = 0; i < entry_count; i++) {
-        uint64_t *entry = (uint64_t *)(entries + i * 24);
-        uint64_t base = entry[0];
-        uint64_t length = entry[1];
-        uint32_t type = *(uint32_t *)&entry[2];
-
-        if (type == 1)
-            direct_map_region(base, length);
+    for (uint32_t i = 0; i < count; i++) {
+        if (regions[i].type == MEM_TYPE_AVAILABLE)
+            direct_map_region(regions[i].base, regions[i].length);
     }
 
     pmm_reserve(0x1000, 0x4000);
