@@ -17,6 +17,7 @@
 #define SYS_GETCWD  11
 
 #define O_RDONLY 0
+#define O_CREAT  0x40
 
 void syscall_init(void) {
     serial_print("[SYSCALL] enabled\n");
@@ -96,10 +97,19 @@ uint64_t syscall_dispatch(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3) {
 
     if (n == SYS_WRITE) {
         const char *buf = (const char *)a2;
-        (void)a1;
-        for (uint64_t i = 0; i < a3; i++)
-            serial_putc(buf[i]);
-        return a3;
+
+        /* fd 1 (stdout) and 2 (stderr) go to the serial console */
+        if (a1 == 1 || a1 == 2) {
+            for (uint64_t i = 0; i < a3; i++)
+                serial_putc(buf[i]);
+            return a3;
+        }
+
+        /* fd >= 3: write to an open file via the VFS */
+        if (a1 >= 3 && a1 < MAX_FDS && cur->fds[a1] != 0)
+            return vfs_write(cur->fds[a1], buf, a3);
+
+        return (uint64_t)-1;
     }
 
     if (n == SYS_READ) {
@@ -115,9 +125,11 @@ uint64_t syscall_dispatch(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3) {
         vfs_file_t *file;
         int fd;
 
-        (void)a2;       /* flags: read-only for now */
         resolve_path((const char *)a1, abs, sizeof(abs));
-        file = vfs_open(abs);
+        if (a2 & O_CREAT)
+            file = vfs_create(abs);
+        else
+            file = vfs_open(abs);
         if (file == 0)
             return (uint64_t)-1;
 

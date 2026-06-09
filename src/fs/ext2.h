@@ -40,4 +40,8 @@ int ext2_readdir(uint32_t inode_num, ext2_dir_cb_t cb, void *ctx);
 uint64_t ext2_inode_size(const struct ext2_inode *inode);
 uint16_t ext2_inode_mode(const struct ext2_inode *inode);
 
+/* Create `path` as a new regular file containing `size` bytes from `data`.
+   Direct blocks only (max 12 * block_size). Returns inode number, or 0. */
+uint32_t ext2_create(const char *path, const void *data, size_t size);
+
 #endif

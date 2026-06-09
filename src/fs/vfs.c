@@ -3,11 +3,21 @@
 #include "kheap.h"
 #include "serial.h"
 
+/* Max bytes a created file may hold: ext2 v1 write path is direct-blocks
+   only (12 * 4096 = 48KB). Enforced here as the write buffer cap. */
+#define VFS_WRITE_CAP (12 * 4096)
+
 struct vfs_file {
     uint32_t inode;
     uint64_t offset;
     uint64_t size;
     uint8_t type;
+    /* write side: a file opened for create buffers its bytes here and
+       flushes them to ext2 once, on close (ext2 v1 has no append/modify). */
+    int writable;
+    uint64_t wlen;
+    char path[256];
+    uint8_t *wbuf;
 };
 
 static int mounted;
@@ -46,7 +56,71 @@ vfs_file_t *vfs_open(const char *path) {
     file->offset = 0;
     file->size = ext2_inode_size(&inode);
     file->type = type;
+    file->writable = 0;
+    file->wlen = 0;
+    file->wbuf = 0;
+    file->path[0] = 0;
     return file;
+}
+
+static void copy_path(char *dst, const char *src, size_t cap) {
+    size_t i = 0;
+    while (src[i] && i + 1 < cap) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = 0;
+}
+
+/* Open `path` for creation. Touches no disk: returns a write handle that
+   buffers bytes in memory; the file is created (and content flushed) on
+   close. Fails if the file already exists. */
+vfs_file_t *vfs_create(const char *path) {
+    uint32_t inode_num;
+    uint8_t type;
+    vfs_file_t *file;
+
+    if (!mounted)
+        return 0;
+
+    /* refuse if it already exists (ext2 v1 cannot rewrite existing files) */
+    if (ext2_lookup_path(path, &inode_num, &type))
+        return 0;
+
+    file = kmalloc(sizeof(*file));
+    if (file == 0)
+        return 0;
+
+    file->wbuf = kmalloc(VFS_WRITE_CAP);
+    if (file->wbuf == 0) {
+        kfree(file);
+        return 0;
+    }
+
+    file->inode = 0;
+    file->offset = 0;
+    file->size = 0;
+    file->type = EXT2_FT_REG_FILE;
+    file->writable = 1;
+    file->wlen = 0;
+    copy_path(file->path, path, sizeof(file->path));
+    return file;
+}
+
+size_t vfs_write(vfs_file_t *file, const void *buffer, size_t size) {
+    const uint8_t *in = buffer;
+    size_t i;
+
+    if (file == 0 || buffer == 0 || !file->writable)
+        return 0;
+
+    if (file->wlen + size > VFS_WRITE_CAP)
+        size = VFS_WRITE_CAP - file->wlen;
+
+    for (i = 0; i < size; i++)
+        file->wbuf[file->wlen + i] = in[i];
+    file->wlen += size;
+    return size;
 }
 
 size_t vfs_read(vfs_file_t *file, void *buffer, size_t size) {
@@ -69,6 +143,15 @@ int vfs_seek(vfs_file_t *file, uint64_t offset) {
 }
 
 void vfs_close(vfs_file_t *file) {
+    if (file == 0)
+        return;
+
+    if (file->writable && file->wbuf != 0) {
+        /* flush buffered bytes to a brand-new ext2 file exactly once */
+        ext2_create(file->path, file->wbuf, file->wlen);
+        kfree(file->wbuf);
+    }
+
     kfree(file);
 }
 

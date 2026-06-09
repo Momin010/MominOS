@@ -14,6 +14,9 @@ typedef unsigned long uintptr_t;
 #define SYS_CHDIR   10
 #define SYS_GETCWD  11
 
+#define O_RDONLY 0
+#define O_CREAT  0x40
+
 static inline long syscall1(long n, long a1) {
     long ret;
     __asm__ volatile ("syscall"

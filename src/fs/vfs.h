@@ -16,7 +16,9 @@ typedef int (*vfs_readdir_cb_t)(const char *name, uint8_t name_len, struct vfs_s
 
 int vfs_mount_root(void);
 vfs_file_t *vfs_open(const char *path);
+vfs_file_t *vfs_create(const char *path);
 size_t vfs_read(vfs_file_t *file, void *buffer, size_t size);
+size_t vfs_write(vfs_file_t *file, const void *buffer, size_t size);
 int vfs_seek(vfs_file_t *file, uint64_t offset);
 void vfs_close(vfs_file_t *file);
 int vfs_stat(const char *path, struct vfs_stat *stat);
