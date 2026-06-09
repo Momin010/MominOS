@@ -207,11 +207,6 @@ static void user_process_entry(void *arg) {
     uint64_t entry = start->entry;
     uint64_t stack = start->stack;
 
-    serial_print("[ELF] entering usermode entry=");
-    serial_print_hex(entry);
-    serial_print(" stack=");
-    serial_print_hex(stack);
-    serial_print("\n");
     user_enter(entry, stack);
 }
 
@@ -300,11 +295,6 @@ struct thread *elf_load_process(const char *path, char *const argv[], struct thr
     /* waiter is set later by waitpid(); parent is unused for now */
     (void)parent;
 
-    serial_print("[ELF] spawned ");
-    serial_print(path);
-    serial_print(" tid=");
-    serial_print_hex(thread->id);
-    serial_print("\n");
     kfree(image);
     return thread;
 }

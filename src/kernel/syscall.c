@@ -94,18 +94,6 @@ static int readdir_pack_cb(const char *name, uint8_t name_len, struct vfs_stat *
 uint64_t syscall_dispatch(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3) {
     struct thread *cur = sched_current_thread();
 
-    {
-        uint64_t rflags;
-        __asm__ volatile ("pushfq; pop %0" : "=r"(rflags));
-        serial_print("[SYS] tid=");
-        serial_print_hex(cur ? cur->id : 0xDEAD);
-        serial_print(" n=");
-        serial_print_hex(n);
-        serial_print(" IF=");
-        serial_print_hex((rflags >> 9) & 1);
-        serial_print("\n");
-    }
-
     if (n == SYS_WRITE) {
         const char *buf = (const char *)a2;
         (void)a1;
@@ -203,22 +191,8 @@ uint64_t syscall_dispatch(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3) {
         pack.buf = (char *)a2;
         pack.cap = a3;
         pack.used = 0;
-        serial_print("[RDIR] abs='");
-        serial_print(abs);
-        serial_print("' a1=");
-        serial_print_hex(a1);
-        serial_print(" buf=");
-        serial_print_hex(a2);
-        serial_print(" cap=");
-        serial_print_hex(a3);
-        serial_print("\n");
-        if (!vfs_readdir(abs, readdir_pack_cb, &pack)) {
-            serial_print("[RDIR] vfs_readdir FAILED\n");
+        if (!vfs_readdir(abs, readdir_pack_cb, &pack))
             return (uint64_t)-1;
-        }
-        serial_print("[RDIR] used=");
-        serial_print_hex(pack.used);
-        serial_print("\n");
         return pack.used;
     }
 

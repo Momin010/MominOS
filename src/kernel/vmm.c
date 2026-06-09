@@ -63,11 +63,59 @@ uint64_t vmm_kernel_pml4(void) {
     return (uint64_t)kernel_pml4;
 }
 
+/* Deep-copy one level of the paging hierarchy. Present, non-huge entries are
+   recursively cloned into freshly allocated tables; huge-page and absent
+   entries are copied by value. This makes the subtree private to the new
+   address space so user mappings (which live in the lower half, sharing the
+   same PML4 subtree as the kernel direct map) do not mutate page tables that
+   other processes also reference. */
+static uint64_t clone_table(uint64_t table_phys, int level) {
+    uint64_t *src = (uint64_t *)table_phys;
+    uint64_t *dst = alloc_table();
+
+    for (uint64_t i = 0; i < ENTRIES_PER_TABLE; i++) {
+        uint64_t entry = src[i];
+
+        if (!(entry & VMM_PRESENT)) {
+            dst[i] = entry;
+            continue;
+        }
+
+        /* Leaf PT entries (level 1) and huge pages map frames directly: copy
+           the mapping by value so it points at the same physical frame. */
+        if (level == 1 || (entry & PTE_PS)) {
+            dst[i] = entry;
+            continue;
+        }
+
+        {
+            uint64_t child = entry & PAGE_ADDR_MASK;
+            uint64_t copy = clone_table(child, level - 1);
+            dst[i] = (copy & PAGE_ADDR_MASK) | (entry & ~PAGE_ADDR_MASK);
+        }
+    }
+
+    return (uint64_t)dst;
+}
+
 uint64_t vmm_create_address_space(void) {
     uint64_t *pml4 = alloc_table();
 
-    for (uint64_t i = 0; i < ENTRIES_PER_TABLE; i++)
-        pml4[i] = kernel_pml4[i];
+    for (uint64_t i = 0; i < ENTRIES_PER_TABLE; i++) {
+        uint64_t entry = kernel_pml4[i];
+
+        /* Lower half (indices 0..255) holds user mappings and the kernel
+           direct map; give each process a private copy of that subtree so
+           per-process user mappings stay isolated. The higher half (kernel
+           heap and other dynamic kernel mappings) is shared by value so it
+           stays visible across all address spaces. */
+        if (i < 256 && (entry & VMM_PRESENT) && !(entry & PTE_PS)) {
+            uint64_t copy = clone_table(entry & PAGE_ADDR_MASK, 3);
+            pml4[i] = (copy & PAGE_ADDR_MASK) | (entry & ~PAGE_ADDR_MASK);
+        } else {
+            pml4[i] = entry;
+        }
+    }
 
     return (uint64_t)pml4;
 }

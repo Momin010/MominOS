@@ -130,15 +130,6 @@ void isr_handler(struct isr_frame *frame) {
         serial_print_hex(cr2);
     }
 
-    serial_print("\n[ISR] rax="); serial_print_hex(frame->rax);
-    serial_print(" rbx="); serial_print_hex(frame->rbx);
-    serial_print(" rcx="); serial_print_hex(frame->rcx);
-    serial_print(" rdx="); serial_print_hex(frame->rdx);
-    serial_print("\n[ISR] rsi="); serial_print_hex(frame->rsi);
-    serial_print(" rdi="); serial_print_hex(frame->rdi);
-    serial_print(" rbp="); serial_print_hex(frame->rbp);
-    serial_print(" r8="); serial_print_hex(frame->r8);
-
     serial_print("\n[ISR] halted\n");
 
     while (1)
