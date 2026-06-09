@@ -1,4 +1,5 @@
 #include "serial.h"
+#include "tty.h"
 
 #define COM1 0x3F8
 
@@ -19,7 +20,16 @@ void serial_init(void) {
     outb(COM1 + 1, 0x00);  /* 38400 baud hi */
     outb(COM1 + 3, 0x03);  /* 8n1 */
     outb(COM1 + 2, 0xC7);  /* FIFO enable */
-    outb(COM1 + 4, 0x0B);  /* RTS/DSR */
+    outb(COM1 + 4, 0x0B);  /* RTS/DSR + OUT2 (gates the IRQ line to the PIC) */
+    outb(COM1 + 1, 0x01);  /* enable "received data available" interrupt (IRQ4) */
+}
+
+/* COM1 RX interrupt: drain every byte the UART has buffered into the line
+   discipline. Reading the RBR clears the data-ready interrupt; we loop until
+   the Line Status Register reports no more data so a burst isn't left behind. */
+void serial_irq(void) {
+    while (inb(COM1 + 5) & 0x01)
+        tty_feed((char)inb(COM1));
 }
 
 void serial_putc(char c) {

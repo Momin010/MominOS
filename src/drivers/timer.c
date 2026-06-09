@@ -33,9 +33,6 @@ void timer_init(uint32_t hz) {
 void timer_irq(void) {
     ticks++;
     sched_tick();
-
-    if (tick_hz != 0 && (ticks % tick_hz) == 0)
-        serial_putc('.');
 }
 
 uint64_t timer_ticks(void) {
