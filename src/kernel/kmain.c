@@ -34,8 +34,8 @@ void kmain(uint64_t mb_info_phys) {
     serial_print("\n");
 
     vmm_init(mem_regions, mem_region_count);
-    serial_print("[VMM] phys(0x10000)=");
-    serial_print_hex(vmm_phys(0x10000));
+    serial_print("[VMM] phys(KERNEL_VMA+0x10000)=");
+    serial_print_hex(vmm_phys(VMM_KERNEL_VMA + 0x10000));
     serial_print("\n");
 
     kheap_init();

@@ -12,6 +12,7 @@ extern uint8_t kernel_phys_end[];
 static uint8_t bitmap[BITMAP_SIZE];
 static uint64_t total_pages = 0;
 static uint64_t free_pages = 0;
+static uint64_t alloc_high_water = 0;   /* highest phys addr ever returned + page */
 
 static inline void bitmap_set(uint64_t bit) {
     bitmap[bit / 8] |= (1 << (bit % 8));
@@ -101,12 +102,20 @@ void pmm_reserve(uint64_t base, uint64_t length) {
 uint64_t pmm_alloc(void) {
     for (uint64_t i = 0; i < MAX_PAGES; i++) {
         if (!bitmap_test(i)) {
+            uint64_t addr = i * PAGE_SIZE;
+
             bitmap_set(i);
             free_pages--;
-            return i * PAGE_SIZE;
+            if (addr + PAGE_SIZE > alloc_high_water)
+                alloc_high_water = addr + PAGE_SIZE;
+            return addr;
         }
     }
     return 0;
+}
+
+uint64_t pmm_alloc_high_water(void) {
+    return alloc_high_water;
 }
 
 void pmm_free(uint64_t addr) {

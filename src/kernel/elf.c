@@ -78,7 +78,7 @@ static int map_segment(uint64_t pml4, uint8_t *image, struct elf64_phdr *ph) {
 
     for (uint64_t virt = seg_start; virt < seg_end; virt += PAGE_SIZE) {
         uint64_t phys = pmm_alloc();
-        uint8_t *page = (uint8_t *)phys;
+        uint8_t *page = VMM_P2V(phys);   /* access the frame via the direct map */
         uint64_t page_file_start;
         uint64_t page_file_end;
 
@@ -119,7 +119,7 @@ static int map_user_stack(uint64_t pml4, uint64_t *top_phys) {
         if (phys == 0)
             return 0;
 
-        zero_page((uint8_t *)phys);
+        zero_page(VMM_P2V(phys));
         vmm_map_in(pml4, virt, phys, VMM_USER | VMM_WRITABLE);
 
         if (virt == USER_STACK_TOP - PAGE_SIZE)
@@ -127,18 +127,6 @@ static int map_user_stack(uint64_t pml4, uint64_t *top_phys) {
     }
 
     return 1;
-}
-
-static void map_kernel_object(uint64_t pml4, void *ptr, uint64_t size) {
-    uint64_t start = (uint64_t)ptr & ~(PAGE_SIZE - 1);
-    uint64_t end = ((uint64_t)ptr + size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-
-    for (uint64_t virt = start; virt < end; virt += PAGE_SIZE) {
-        uint64_t phys = vmm_phys(virt);
-
-        if (phys != 0)
-            vmm_map_in(pml4, virt, phys, VMM_WRITABLE);
-    }
 }
 
 static uint64_t str_len(const char *s) {
@@ -162,7 +150,7 @@ static uint64_t str_len(const char *s) {
 static uint64_t build_argv_stack(uint64_t top_phys, char *const argv[], int argc) {
     /* page base virtual address and matching physical base */
     uint64_t page_virt = USER_STACK_TOP - PAGE_SIZE;
-    uint8_t *page = (uint8_t *)top_phys;
+    uint8_t *page = VMM_P2V(top_phys);   /* access top stack frame via direct map */
     uint64_t sp_virt = USER_STACK_TOP;     /* grows downward */
     uint64_t str_virt[MAX_ARGV];
     int i;
@@ -285,7 +273,9 @@ struct thread *elf_load_process(const char *path, char *const argv[], struct thr
        real argc/argv and userspace SSE on the entry frame stays aligned. */
     start->stack = build_argv_stack(top_phys, argv, argc);
 
-    map_kernel_object(pml4, start, sizeof(*start));
+    /* `start` lives in the kheap (higher half, PML4[256]), which is shared by
+       value into every process address space, so it is already visible to the
+       new thread without an explicit mapping. */
 
     thread = thread_create_process(user_process_entry, start, pml4);
     if (thread == 0) {

@@ -1,6 +1,6 @@
 CC     = gcc
 CFLAGS = -std=gnu99 -ffreestanding -fno-pic -fno-stack-protector -m64 \
-         -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
+         -mcmodel=kernel -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
          -Wall -Wextra -O2 -Isrc/kernel -Isrc/drivers -Isrc/fs
 
 AS      = nasm

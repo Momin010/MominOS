@@ -36,21 +36,6 @@ static inline uint64_t align_down(uint64_t value, uint64_t align) {
     return value & ~(align - 1);
 }
 
-static void map_kernel_range(uint64_t pml4, uint64_t virt, uint64_t size) {
-    uint64_t start = virt & ~0xFFFULL;
-    uint64_t end = (virt + size + 0xFFFULL) & ~0xFFFULL;
-
-    if (pml4 == vmm_kernel_pml4())
-        return;
-
-    for (uint64_t addr = start; addr < end; addr += 4096) {
-        uint64_t phys = vmm_phys(addr);
-
-        if (phys != 0)
-            vmm_map_in(pml4, addr, phys, VMM_WRITABLE);
-    }
-}
-
 static void enable_sse(void) {
     uint64_t cr0;
     uint64_t cr4;
@@ -211,8 +196,9 @@ static struct thread *thread_create_with_pml4(thread_entry_t entry, void *arg, u
     thread->cwd[1] = 0;
 
     fxsave_to(thread->fxsave);
-    map_kernel_range(pml4, (uint64_t)thread, sizeof(*thread));
-    map_kernel_range(pml4, (uint64_t)stack_base, THREAD_STACK_SIZE);
+    /* The thread struct and its kernel stack live in the kheap (higher half,
+       shared by value into every process address space), so they are already
+       mapped in `pml4`; no per-process kernel mapping is needed. */
     enqueue_thread(thread);
 
     irq_restore(flags);
@@ -360,6 +346,27 @@ void sched_reap(struct thread *thread) {
 
     thread->state = THREAD_DEAD;
     irq_restore(flags);
+
+    /* Free the corpse's address space. This is safe only because:
+       - reap runs on a DIFFERENT thread (the waiter/parent), so the corpse's
+         page tables are not the live CR3. The dead thread already context-
+         switched away (it halts in thread_exit_code), so CR3 holds the
+         reaper's pml4, not the corpse's.
+       - vmm_destroy_address_space frees ONLY the user-private lower half
+         (PML4 0..255) plus the corpse's own PML4 page; the shared kernel
+         higher half (256..511) is left untouched.
+       Belt-and-suspenders: never destroy the active CR3 or the kernel pml4. */
+    {
+        uint64_t cur_cr3;
+        __asm__ volatile ("mov %%cr3, %0" : "=r"(cur_cr3));
+        cur_cr3 &= 0x000FFFFFFFFFF000ULL;
+
+        if (thread->pml4 != 0 &&
+            thread->pml4 != vmm_kernel_pml4() &&
+            thread->pml4 != cur_cr3) {
+            vmm_destroy_address_space(thread->pml4);
+        }
+    }
 
     /* now safe to free; we are running on a different thread's stack */
     kfree(thread->stack_base);

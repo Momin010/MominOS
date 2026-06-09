@@ -11,7 +11,29 @@
 #define HUGE_ADDR_MASK 0x000FFFFFFFE00000ULL
 #define PTE_PS (1ULL << 7)
 
-static uint64_t *kernel_pml4;
+/* Higher-half layout. Must stay in sync with linker.ld and multiboot_entry.asm.
+ *   KERNEL_VMA      = 0xFFFFFFFF80000000  PML4[511]  (kernel image, phys+KERNEL_VMA)
+ *   DIRECT_MAP_BASE = 0xFFFF808000000000  PML4[257]  (all physical RAM)
+ * Every page-table walk dereferences a physical frame through the direct map:
+ * P2V(phys) = phys + DIRECT_MAP_BASE. PTEs always store physical addresses. */
+#define KERNEL_VMA      0xFFFFFFFF80000000ULL
+#define DIRECT_MAP_BASE 0xFFFF808000000000ULL
+
+/* Boot tables span phys 0x1000..0x8FFF (8 frames); reserve them in the PMM. */
+#define BOOT_PT_BASE 0x1000ULL
+#define BOOT_PT_SIZE 0x8000ULL
+
+/* How much of low physical RAM the boot tables already map (32MB), and thus how
+ * much vmm_init can rely on being reachable via the direct map before it has
+ * finished building the full map. Early page-table frames must land below this. */
+#define BOOT_MAPPED_LIMIT (32ULL * 1024 * 1024)
+
+/* kernel_pml4 holds the PHYSICAL address of the active kernel PML4. */
+static uint64_t kernel_pml4_phys;
+
+static inline uint64_t *p2v(uint64_t phys) {
+    return (uint64_t *)(phys + DIRECT_MAP_BASE);
+}
 
 static inline uint64_t read_cr3(void) {
     uint64_t cr3;
@@ -28,13 +50,14 @@ static inline void invlpg(uint64_t virt) {
 }
 
 static void zero_page(uint64_t phys) {
-    uint64_t *page = (uint64_t *)phys;
+    uint64_t *page = p2v(phys);
 
     for (uint64_t i = 0; i < ENTRIES_PER_TABLE; i++)
         page[i] = 0;
 }
 
-static uint64_t *alloc_table(void) {
+/* Returns the PHYSICAL address of a fresh, zeroed page-table frame. */
+static uint64_t alloc_table(void) {
     uint64_t phys = pmm_alloc();
 
     if (phys == 0) {
@@ -44,81 +67,111 @@ static uint64_t *alloc_table(void) {
     }
 
     zero_page(phys);
-    return (uint64_t *)phys;
+    return phys;
 }
 
+/* table is a VIRTUAL (direct-map) pointer to a page-table frame. Returns a
+   VIRTUAL pointer to the next-level table, allocating it if absent. PTEs store
+   physical addresses. */
 static uint64_t *next_table(uint64_t *table, uint16_t index, uint64_t flags) {
-    uint64_t *next;
+    uint64_t next_phys;
 
     if (!(table[index] & VMM_PRESENT)) {
-        next = alloc_table();
-        table[index] = ((uint64_t)next & PAGE_ADDR_MASK) | VMM_PRESENT | VMM_WRITABLE | (flags & VMM_USER);
+        next_phys = alloc_table();
+        table[index] = (next_phys & PAGE_ADDR_MASK) | VMM_PRESENT | VMM_WRITABLE | (flags & VMM_USER);
     } else if (flags & VMM_USER) {
         table[index] |= VMM_USER;
     }
 
-    return (uint64_t *)(table[index] & PAGE_ADDR_MASK);
+    return p2v(table[index] & PAGE_ADDR_MASK);
 }
 
 uint64_t vmm_kernel_pml4(void) {
-    return (uint64_t)kernel_pml4;
+    return kernel_pml4_phys;
 }
 
-/* Deep-copy one level of the paging hierarchy. Present, non-huge entries are
-   recursively cloned into freshly allocated tables; huge-page and absent
-   entries are copied by value. This makes the subtree private to the new
-   address space so user mappings (which live in the lower half, sharing the
-   same PML4 subtree as the kernel direct map) do not mutate page tables that
-   other processes also reference. */
-static uint64_t clone_table(uint64_t table_phys, int level) {
-    uint64_t *src = (uint64_t *)table_phys;
-    uint64_t *dst = alloc_table();
-
-    for (uint64_t i = 0; i < ENTRIES_PER_TABLE; i++) {
-        uint64_t entry = src[i];
-
-        if (!(entry & VMM_PRESENT)) {
-            dst[i] = entry;
-            continue;
-        }
-
-        /* Leaf PT entries (level 1) and huge pages map frames directly: copy
-           the mapping by value so it points at the same physical frame. */
-        if (level == 1 || (entry & PTE_PS)) {
-            dst[i] = entry;
-            continue;
-        }
-
-        {
-            uint64_t child = entry & PAGE_ADDR_MASK;
-            uint64_t copy = clone_table(child, level - 1);
-            dst[i] = (copy & PAGE_ADDR_MASK) | (entry & ~PAGE_ADDR_MASK);
-        }
-    }
-
-    return (uint64_t)dst;
-}
-
+/* Create a new user address space. With the kernel now living entirely in the
+   higher half (PML4 entries 256..511), the lower half (0..255) belongs solely
+   to user space. We SHARE the kernel's higher-half PML4 entries by value (so
+   the kernel image, direct map and kheap stay mapped in every process) and
+   leave the lower half EMPTY. User mappings (ELF segments, user stack) are
+   added later, exclusively into the now-private lower half, and can therefore
+   be freed wholesale on process exit without touching shared kernel pages. */
 uint64_t vmm_create_address_space(void) {
-    uint64_t *pml4 = alloc_table();
+    uint64_t pml4_phys = alloc_table();
+    uint64_t *pml4 = p2v(pml4_phys);
+    uint64_t *kpml4 = p2v(kernel_pml4_phys);
+
+    /* Kernel higher-half PML4 slots are copied BY VALUE here, so every kernel
+       PML4 entry (256 kheap, 257 direct map, 511 image) must already exist
+       before the first process is created (they do: kheap_init + vmm_init run
+       pre-process). Growth under an existing slot's sub-tables stays visible;
+       but any future kernel mapping that lands in a NEW PML4 slot after
+       processes exist would not propagate to them without an explicit sync. */
 
     for (uint64_t i = 0; i < ENTRIES_PER_TABLE; i++) {
-        uint64_t entry = kernel_pml4[i];
+        if (i < 256)
+            pml4[i] = 0;                 /* private, empty user half */
+        else
+            pml4[i] = kpml4[i];          /* shared kernel half */
+    }
 
-        /* Lower half (indices 0..255) holds user mappings and the kernel
-           direct map; give each process a private copy of that subtree so
-           per-process user mappings stay isolated. The higher half (kernel
-           heap and other dynamic kernel mappings) is shared by value so it
-           stays visible across all address spaces. */
-        if (i < 256 && (entry & VMM_PRESENT) && !(entry & PTE_PS)) {
-            uint64_t copy = clone_table(entry & PAGE_ADDR_MASK, 3);
-            pml4[i] = (copy & PAGE_ADDR_MASK) | (entry & ~PAGE_ADDR_MASK);
+    return pml4_phys;
+}
+
+/* Recursively free a user-half paging subtree rooted at table_phys. level 4 =
+   PML4, 3 = PDPT, 2 = PD, 1 = PT. Every present non-huge entry points at a
+   child table that is freed depth-first; leaf frames (level 1 entries and huge
+   pages) are physical user frames and are freed too. Frees table_phys last.
+   Only ever called on lower-half (user-private) subtrees. */
+static void destroy_subtree(uint64_t table_phys, int level) {
+    uint64_t *table = p2v(table_phys);
+
+    for (uint64_t i = 0; i < ENTRIES_PER_TABLE; i++) {
+        uint64_t entry = table[i];
+
+        if (!(entry & VMM_PRESENT))
+            continue;
+
+        if (level == 1) {
+            /* leaf 4KB frame */
+            pmm_free(entry & PAGE_ADDR_MASK);
+        } else if (entry & PTE_PS) {
+            /* leaf huge page (2MB at PD level / 1GB at PDPT level) */
+            pmm_free(entry & HUGE_ADDR_MASK);
         } else {
-            pml4[i] = entry;
+            destroy_subtree(entry & PAGE_ADDR_MASK, level - 1);
         }
     }
 
-    return (uint64_t)pml4;
+    pmm_free(table_phys);
+}
+
+/* Tear down a process address space: free every page table and frame in the
+   lower half (entries 0..255, exclusively user-private), then free the PML4
+   frame itself. Entries 256..511 (shared kernel) are NEVER touched. The caller
+   must guarantee pml4_phys is not the currently active CR3 and is not the
+   shared kernel PML4. */
+void vmm_destroy_address_space(uint64_t pml4_phys) {
+    uint64_t *pml4;
+
+    if (pml4_phys == 0 || pml4_phys == kernel_pml4_phys)
+        return;
+
+    pml4 = p2v(pml4_phys);
+    for (uint64_t i = 0; i < 256; i++) {
+        uint64_t entry = pml4[i];
+
+        if (!(entry & VMM_PRESENT))
+            continue;
+        if (entry & PTE_PS) {
+            pmm_free(entry & HUGE_ADDR_MASK);
+            continue;
+        }
+        destroy_subtree(entry & PAGE_ADDR_MASK, 3);
+    }
+
+    pmm_free(pml4_phys);
 }
 
 void vmm_switch_pml4(uint64_t pml4) {
@@ -130,7 +183,7 @@ static void map_2m(uint64_t virt, uint64_t phys, uint64_t flags) {
     uint16_t pdpt_i = (virt >> 30) & 0x1FF;
     uint16_t pd_i = (virt >> 21) & 0x1FF;
 
-    uint64_t *pdpt = next_table(kernel_pml4, pml4_i, flags);
+    uint64_t *pdpt = next_table(p2v(kernel_pml4_phys), pml4_i, flags);
     uint64_t *pd = next_table(pdpt, pdpt_i, flags);
 
     pd[pd_i] = (phys & HUGE_ADDR_MASK) | flags | VMM_PRESENT | PTE_PS;
@@ -140,36 +193,59 @@ static uint64_t *split_2m_page(uint64_t *pd, uint16_t index, uint64_t flags) {
     uint64_t old = pd[index];
     uint64_t base = old & HUGE_ADDR_MASK;
     uint64_t entry_flags = old & ~HUGE_ADDR_MASK;
-    uint64_t *pt = alloc_table();
+    uint64_t pt_phys = alloc_table();
+    uint64_t *pt = p2v(pt_phys);
 
     entry_flags = (entry_flags & ~PTE_PS) | (flags & VMM_USER);
     for (uint64_t i = 0; i < ENTRIES_PER_TABLE; i++)
         pt[i] = (base + i * PAGE_SIZE) | entry_flags;
 
-    pd[index] = ((uint64_t)pt & PAGE_ADDR_MASK) | (entry_flags & (VMM_PRESENT | VMM_WRITABLE | VMM_USER));
+    pd[index] = (pt_phys & PAGE_ADDR_MASK) | (entry_flags & (VMM_PRESENT | VMM_WRITABLE | VMM_USER));
     return pt;
 }
 
+/* Map [base, base+length) of physical RAM into the direct map at
+   DIRECT_MAP_BASE + phys, using 2MB huge pages. */
 static void direct_map_region(uint64_t base, uint64_t length) {
     uint64_t start = base & ~(HUGE_PAGE_SIZE - 1);
     uint64_t end = (base + length + HUGE_PAGE_SIZE - 1) & ~(HUGE_PAGE_SIZE - 1);
 
     for (uint64_t addr = start; addr < end; addr += HUGE_PAGE_SIZE)
-        map_2m(addr, addr, VMM_PRESENT | VMM_WRITABLE);
+        map_2m(DIRECT_MAP_BASE + addr, addr, VMM_PRESENT | VMM_WRITABLE);
 }
 
 void vmm_init(const struct mem_region *regions, uint32_t count) {
-    kernel_pml4 = alloc_table();
+    uint64_t max_phys = 0;
 
+    kernel_pml4_phys = alloc_table();
+
+    /* Map the kernel image (and low RAM) into the higher half at KERNEL_VMA so
+       the kernel keeps running after the CR3 switch. The boot tables flat-map
+       0..32MB at KERNEL_VMA; replicate at least that here (the loaded image,
+       .bss and boot stack all live below 32MB). */
+    for (uint64_t addr = 0; addr < BOOT_MAPPED_LIMIT; addr += HUGE_PAGE_SIZE)
+        map_2m(KERNEL_VMA + addr, addr, VMM_PRESENT | VMM_WRITABLE);
+
+    /* Build the full physical direct map at DIRECT_MAP_BASE. */
     for (uint32_t i = 0; i < count; i++) {
-        if (regions[i].type == MEM_TYPE_AVAILABLE)
+        if (regions[i].type == MEM_TYPE_AVAILABLE) {
             direct_map_region(regions[i].base, regions[i].length);
+            if (regions[i].base + regions[i].length > max_phys)
+                max_phys = regions[i].base + regions[i].length;
+        }
     }
 
-    pmm_reserve(0x1000, 0x4000);
+    /* Page-table frames allocated above must lie within the boot-mapped window
+       so the p2v() dereferences during this build were valid. Warn loudly if
+       the assumption ever breaks. */
+    if (pmm_alloc_high_water() > BOOT_MAPPED_LIMIT)
+        serial_print("[VMM] WARN: early page tables exceeded boot-mapped 32MB\n");
 
-    write_cr3((uint64_t)kernel_pml4);
+    pmm_reserve(BOOT_PT_BASE, BOOT_PT_SIZE);
+
+    write_cr3(kernel_pml4_phys);
     serial_print("[VMM] direct map initialized\n");
+    (void)max_phys;
 }
 
 void vmm_map_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags) {
@@ -178,7 +254,7 @@ void vmm_map_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags
     uint16_t pd_i = (virt >> 21) & 0x1FF;
     uint16_t pt_i = (virt >> 12) & 0x1FF;
 
-    uint64_t *pml4 = (uint64_t *)pml4_phys;
+    uint64_t *pml4 = p2v(pml4_phys);
     uint64_t *pdpt = next_table(pml4, pml4_i, flags);
     uint64_t *pd = next_table(pdpt, pdpt_i, flags);
     uint64_t *pt;
@@ -193,7 +269,7 @@ void vmm_map_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags
 }
 
 void vmm_map(uint64_t virt, uint64_t phys, uint64_t flags) {
-    vmm_map_in((uint64_t)kernel_pml4, virt, phys, flags);
+    vmm_map_in(kernel_pml4_phys, virt, phys, flags);
 }
 
 void vmm_unmap(uint64_t virt) {
@@ -202,18 +278,18 @@ void vmm_unmap(uint64_t virt) {
     uint16_t pd_i = (virt >> 21) & 0x1FF;
     uint16_t pt_i = (virt >> 12) & 0x1FF;
 
-    uint64_t *pml4 = kernel_pml4;
+    uint64_t *pml4 = p2v(kernel_pml4_phys);
     uint64_t *pdpt;
     uint64_t *pd;
     uint64_t *pt;
 
     if (!(pml4[pml4_i] & VMM_PRESENT))
         return;
-    pdpt = (uint64_t *)(pml4[pml4_i] & PAGE_ADDR_MASK);
+    pdpt = p2v(pml4[pml4_i] & PAGE_ADDR_MASK);
 
     if (!(pdpt[pdpt_i] & VMM_PRESENT))
         return;
-    pd = (uint64_t *)(pdpt[pdpt_i] & PAGE_ADDR_MASK);
+    pd = p2v(pdpt[pdpt_i] & PAGE_ADDR_MASK);
 
     if (!(pd[pd_i] & VMM_PRESENT))
         return;
@@ -223,7 +299,7 @@ void vmm_unmap(uint64_t virt) {
         return;
     }
 
-    pt = (uint64_t *)(pd[pd_i] & PAGE_ADDR_MASK);
+    pt = p2v(pd[pd_i] & PAGE_ADDR_MASK);
     pt[pt_i] = 0;
     invlpg(virt);
 }
@@ -239,24 +315,24 @@ uint64_t vmm_phys(uint64_t virt) {
     uint64_t *pd;
     uint64_t *pt;
 
-    if (kernel_pml4 == 0)
-        kernel_pml4 = (uint64_t *)(read_cr3() & PAGE_ADDR_MASK);
-    pml4 = kernel_pml4;
+    if (kernel_pml4_phys == 0)
+        kernel_pml4_phys = read_cr3() & PAGE_ADDR_MASK;
+    pml4 = p2v(kernel_pml4_phys);
 
     if (!(pml4[pml4_i] & VMM_PRESENT))
         return 0;
-    pdpt = (uint64_t *)(pml4[pml4_i] & PAGE_ADDR_MASK);
+    pdpt = p2v(pml4[pml4_i] & PAGE_ADDR_MASK);
 
     if (!(pdpt[pdpt_i] & VMM_PRESENT))
         return 0;
-    pd = (uint64_t *)(pdpt[pdpt_i] & PAGE_ADDR_MASK);
+    pd = p2v(pdpt[pdpt_i] & PAGE_ADDR_MASK);
 
     if (!(pd[pd_i] & VMM_PRESENT))
         return 0;
     if (pd[pd_i] & PTE_PS)
         return (pd[pd_i] & HUGE_ADDR_MASK) | (virt & (HUGE_PAGE_SIZE - 1));
 
-    pt = (uint64_t *)(pd[pd_i] & PAGE_ADDR_MASK);
+    pt = p2v(pd[pd_i] & PAGE_ADDR_MASK);
     if (!(pt[pt_i] & VMM_PRESENT))
         return 0;
 

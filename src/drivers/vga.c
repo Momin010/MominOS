@@ -1,6 +1,9 @@
 #include "vga.h"
 
-#define VGA_BUF  ((volatile unsigned short *)0xB8000)
+/* The kernel runs higher-half: physical 0xB8000 is reachable through the
+   kernel's flat map at KERNEL_VMA + 0xB8000 (PML4[511], shared into every
+   address space), not via an identity map (which no longer exists). */
+#define VGA_BUF  ((volatile unsigned short *)(0xFFFFFFFF80000000ULL + 0xB8000))
 #define WIDTH    80
 #define HEIGHT   25
 
