@@ -460,13 +460,19 @@ int ext2_lookup_path(const char *path, uint32_t *inode_out, uint8_t *type_out) {
 /* ------------------------------------------------------------------ */
 /* Write path                                                          */
 /*                                                                     */
-/* v1 limits: creates a new regular file in an existing directory and  */
-/* writes only DIRECT blocks (i_block[0..11]) -> max 12 * block_size   */
-/* (48 KB at 4 KB blocks). No indirect blocks, no append/truncate of   */
-/* existing files. Assumes the new directory entry fits in the parent  */
-/* directory's existing last data block (true for a fresh mke2fs root).*/
-/* Single block group is the common case but the allocation helpers    */
-/* scan every group, so multi-group images also work.                  */
+/* Supports: create empty file, open-existing, write/append at any     */
+/* offset (partial-block read-modify-write), overwrite via truncate,   */
+/* and growth through DIRECT blocks (i_block[0..11]) plus the SINGLE-   */
+/* INDIRECT block (i_block[12]). Maximum file size is therefore        */
+/*   (12 + block_size/4) * block_size                                  */
+/* = (12 + 1024) * 4096 = 1036 * 4096 ~= 4.04 MB at 4 KB blocks.       */
+/* Double/triple-indirect WRITES are not implemented (reads of them    */
+/* already work via inode_block, used by the 5 MB big.bin self-test).  */
+/* Directory entries are added into the parent's existing last data    */
+/* block (true for a fresh mke2fs root). Allocation helpers scan every */
+/* group, so multi-group images also work. i_size and i_blocks (the    */
+/* latter in 512-byte sectors, counting indirect blocks too) are kept  */
+/* consistent so e2fsck -fn stays clean.                               */
 /* ------------------------------------------------------------------ */
 
 #define EXT2_DIRECT_BLOCKS 12
@@ -603,6 +609,281 @@ static uint32_t alloc_inode(int is_dir) {
     return 0;
 }
 
+/* Clear one bit in a bitmap block (mark free). Returns 1 on success. */
+static int free_in_bitmap(uint32_t bitmap_block, uint32_t bit) {
+    uint8_t *buf = kmalloc(block_size);
+    int ok = 0;
+
+    if (buf == 0)
+        return 0;
+
+    if (!read_block(bitmap_block, buf))
+        goto out;
+
+    buf[bit / 8] &= (uint8_t)~(1u << (bit % 8));
+    if (write_block(bitmap_block, buf))
+        ok = 1;
+
+out:
+    kfree(buf);
+    return ok;
+}
+
+/* Free one data block (absolute number): clear its bitmap bit and bump the
+   group + superblock free-block counts. */
+static int free_block(uint32_t block) {
+    uint32_t grp;
+    uint32_t group_base;
+    uint32_t bit;
+
+    if (block < super.s_first_data_block || block >= super.s_blocks_count)
+        return 0;
+
+    grp = (block - super.s_first_data_block) / super.s_blocks_per_group;
+    group_base = super.s_first_data_block + grp * super.s_blocks_per_group;
+    bit = block - group_base;
+
+    if (!free_in_bitmap(groups[grp].bg_block_bitmap, bit))
+        return 0;
+
+    groups[grp].bg_free_blocks_count++;
+    super.s_free_blocks_count++;
+    flush_group_desc(grp);
+    flush_superblock_counts();
+    return 1;
+}
+
+/* Allocate one data block and zero its contents on disk. Returns absolute
+   block number, or 0 on failure. Used for indirect blocks (must be zeroed so
+   unused pointer slots are 0) and for new data blocks. */
+static uint32_t alloc_zeroed_block(void) {
+    uint32_t blk = alloc_block();
+    uint8_t *buf;
+
+    if (blk == 0)
+        return 0;
+
+    buf = kmalloc(block_size);
+    if (buf == 0) {
+        free_block(blk);
+        return 0;
+    }
+    for (uint32_t i = 0; i < block_size; i++)
+        buf[i] = 0;
+    if (!write_block(blk, buf)) {
+        kfree(buf);
+        free_block(blk);
+        return 0;
+    }
+    kfree(buf);
+    return blk;
+}
+
+/* Map a logical block index to a physical block for WRITING, allocating the
+   data block (and the single-indirect block if needed) when missing.
+   *i_blocks_sectors is incremented (in 512B units) for each newly allocated
+   block (data or indirect). Supports direct (0..11) + single-indirect
+   (12 .. 11 + ptrs_per_block). Returns physical block, or 0 on failure. */
+static uint32_t inode_block_alloc(struct ext2_inode *inode, uint32_t logical,
+                                  uint32_t *i_blocks_sectors) {
+    uint32_t ptrs_per_block = block_size / sizeof(uint32_t);
+    uint32_t sectors_per = block_size / 512;
+
+    if (logical < EXT2_DIRECT_BLOCKS) {
+        if (inode->i_block[logical] == 0) {
+            uint32_t blk = alloc_block();
+            if (blk == 0)
+                return 0;
+            inode->i_block[logical] = blk;
+            *i_blocks_sectors += sectors_per;
+        }
+        return inode->i_block[logical];
+    }
+
+    logical -= EXT2_DIRECT_BLOCKS;
+    if (logical < ptrs_per_block) {
+        uint32_t *ptrs;
+        uint32_t indirect = inode->i_block[12];
+        uint32_t result = 0;
+
+        if (indirect == 0) {
+            indirect = alloc_zeroed_block();
+            if (indirect == 0)
+                return 0;
+            inode->i_block[12] = indirect;
+            *i_blocks_sectors += sectors_per;
+        }
+
+        ptrs = kmalloc(block_size);
+        if (ptrs == 0)
+            return 0;
+        if (!read_block(indirect, ptrs)) {
+            kfree(ptrs);
+            return 0;
+        }
+
+        if (ptrs[logical] == 0) {
+            uint32_t blk = alloc_block();
+            if (blk == 0) {
+                kfree(ptrs);
+                return 0;
+            }
+            ptrs[logical] = blk;
+            *i_blocks_sectors += sectors_per;
+            if (!write_block(indirect, ptrs)) {
+                kfree(ptrs);
+                return 0;
+            }
+        }
+        result = ptrs[logical];
+        kfree(ptrs);
+        return result;
+    }
+
+    return 0;       /* beyond single-indirect: not supported for writes */
+}
+
+/* Write `size` bytes from `data` into inode at byte `offset`, growing the
+   file. Read-modify-writes partial blocks so appends mid-block are safe. */
+size_t ext2_write(uint32_t inode_num, uint64_t offset, const void *data, size_t size) {
+    struct ext2_inode inode;
+    const uint8_t *src = data;
+    uint8_t *blkbuf;
+    uint32_t i_blocks = 0;
+    uint64_t end;
+    size_t done = 0;
+
+    if (!mounted || data == 0)
+        return 0;
+
+    if (!ext2_read_inode(inode_num, &inode))
+        return 0;
+
+    i_blocks = inode.i_blocks;
+
+    blkbuf = kmalloc(block_size);
+    if (blkbuf == 0)
+        return 0;
+
+    while (done < size) {
+        uint32_t logical = (uint32_t)((offset + done) / block_size);
+        uint32_t block_off = (uint32_t)((offset + done) % block_size);
+        size_t chunk = block_size - block_off;
+        uint32_t phys;
+
+        if (chunk > size - done)
+            chunk = size - done;
+
+        phys = inode_block_alloc(&inode, logical, &i_blocks);
+        if (phys == 0)
+            break;
+
+        /* read-modify-write the block to preserve surrounding bytes */
+        if (!read_block(phys, blkbuf))
+            break;
+        for (size_t b = 0; b < chunk; b++)
+            blkbuf[block_off + b] = src[done + b];
+        if (!write_block(phys, blkbuf))
+            break;
+
+        done += chunk;
+    }
+
+    kfree(blkbuf);
+
+    end = offset + done;
+    if (end > inode.i_size)
+        inode.i_size = (uint32_t)end;
+    inode.i_blocks = i_blocks;
+
+    if (!write_inode(inode_num, &inode))
+        return 0;
+
+    return done;
+}
+
+/* Truncate file down to new_size, freeing data + indirect blocks no longer
+   needed. Only supports new_size <= current size. */
+int ext2_truncate(uint32_t inode_num, uint64_t new_size) {
+    struct ext2_inode inode;
+    uint32_t ptrs_per_block;
+    uint32_t sectors_per;
+    uint32_t i_blocks;
+    uint32_t keep_blocks;
+    uint32_t total_blocks;
+
+    if (!mounted)
+        return 0;
+
+    if (!ext2_read_inode(inode_num, &inode))
+        return 0;
+
+    if (new_size > inode.i_size)
+        return 0;       /* grow handled by ext2_write */
+
+    ptrs_per_block = block_size / sizeof(uint32_t);
+    sectors_per = block_size / 512;
+    i_blocks = inode.i_blocks;
+
+    keep_blocks = (uint32_t)((new_size + block_size - 1) / block_size);
+    total_blocks = (uint32_t)((inode.i_size + block_size - 1) / block_size);
+
+    /* free direct blocks beyond keep_blocks */
+    for (uint32_t l = keep_blocks; l < total_blocks && l < EXT2_DIRECT_BLOCKS; l++) {
+        if (inode.i_block[l] != 0) {
+            free_block(inode.i_block[l]);
+            inode.i_block[l] = 0;
+            i_blocks -= sectors_per;
+        }
+    }
+
+    /* free single-indirect data blocks beyond keep_blocks */
+    if (inode.i_block[12] != 0) {
+        uint32_t *ptrs = kmalloc(block_size);
+        int touched = 0;
+        int any_left = 0;
+
+        if (ptrs == 0)
+            return 0;
+        if (!read_block(inode.i_block[12], ptrs)) {
+            kfree(ptrs);
+            return 0;
+        }
+
+        for (uint32_t i = 0; i < ptrs_per_block; i++) {
+            uint32_t logical = EXT2_DIRECT_BLOCKS + i;
+
+            if (ptrs[i] == 0)
+                continue;
+            if (logical >= keep_blocks) {
+                free_block(ptrs[i]);
+                ptrs[i] = 0;
+                i_blocks -= sectors_per;
+                touched = 1;
+            } else {
+                any_left = 1;
+            }
+        }
+
+        if (any_left) {
+            if (touched && !write_block(inode.i_block[12], ptrs)) {
+                kfree(ptrs);
+                return 0;
+            }
+        } else {
+            /* the whole indirect block is now empty: free it too */
+            free_block(inode.i_block[12]);
+            inode.i_block[12] = 0;
+            i_blocks -= sectors_per;
+        }
+        kfree(ptrs);
+    }
+
+    inode.i_size = (uint32_t)new_size;
+    inode.i_blocks = i_blocks;
+    return write_inode(inode_num, &inode);
+}
+
 static uint32_t dirent_min_len(uint8_t name_len) {
     /* 8-byte header + name, rounded up to 4 bytes */
     return (8 + name_len + 3) & ~3u;
@@ -693,22 +974,14 @@ out:
     return ok;
 }
 
-/* Create a new regular file `name` in directory dir_inode_num and write
-   `size` bytes from `data` into it. Returns the new inode number, or 0. */
-static uint32_t ext2_create_file(uint32_t dir_inode_num, const char *name, uint8_t name_len,
-                                 const void *data, size_t size) {
+/* Create a new empty regular file `name` in directory dir_inode_num. Returns
+   the new inode number, or 0. Caller writes content via ext2_write. */
+static uint32_t ext2_create_file(uint32_t dir_inode_num, const char *name, uint8_t name_len) {
     struct ext2_inode inode;
-    const uint8_t *src = data;
     uint32_t inode_num;
-    uint32_t nblocks;
-    uint32_t i;
 
     if (!mounted)
         return 0;
-
-    nblocks = (uint32_t)((size + block_size - 1) / block_size);
-    if (nblocks > EXT2_DIRECT_BLOCKS)
-        return 0;       /* v1: direct blocks only */
 
     inode_num = alloc_inode(0);
     if (inode_num == 0)
@@ -720,39 +993,8 @@ static uint32_t ext2_create_file(uint32_t dir_inode_num, const char *name, uint8
 
     inode.i_mode = 0x8000 | 0644;       /* regular file, rw-r--r-- */
     inode.i_links_count = 1;
-    inode.i_size = (uint32_t)size;
-    /* i_blocks counts 512-byte sectors, not fs blocks */
-    inode.i_blocks = nblocks * (block_size / 512);
-
-    for (i = 0; i < nblocks; i++) {
-        uint32_t blk = alloc_block();
-        uint8_t *blkbuf;
-        size_t off = (size_t)i * block_size;
-        size_t chunk = size - off;
-
-        if (blk == 0)
-            return 0;
-
-        if (chunk > block_size)
-            chunk = block_size;
-
-        blkbuf = kmalloc(block_size);
-        if (blkbuf == 0)
-            return 0;
-
-        for (size_t b = 0; b < block_size; b++)
-            blkbuf[b] = 0;
-        for (size_t b = 0; b < chunk; b++)
-            blkbuf[b] = src[off + b];
-
-        if (!write_block(blk, blkbuf)) {
-            kfree(blkbuf);
-            return 0;
-        }
-        kfree(blkbuf);
-
-        inode.i_block[i] = blk;
-    }
+    inode.i_size = 0;
+    inode.i_blocks = 0;
 
     if (!write_inode(inode_num, &inode))
         return 0;
@@ -812,9 +1054,9 @@ static int split_parent(const char *path, uint32_t *parent_out,
     return 1;
 }
 
-/* Public: create `path` as a new regular file containing `size` bytes.
-   Fails if the file already exists. Returns the inode number, or 0. */
-uint32_t ext2_create(const char *path, const void *data, size_t size) {
+/* Public: create `path` as a new empty regular file. Fails if it already
+   exists. Returns the new inode number, or 0. */
+uint32_t ext2_create_empty(const char *path) {
     uint32_t parent;
     const char *name;
     size_t name_len;
@@ -833,5 +1075,19 @@ uint32_t ext2_create(const char *path, const void *data, size_t size) {
     if (name_len == 0 || name_len > 255)
         return 0;
 
-    return ext2_create_file(parent, name, (uint8_t)name_len, data, size);
+    return ext2_create_file(parent, name, (uint8_t)name_len);
+}
+
+/* Public: create `path` as a new regular file containing `size` bytes.
+   Fails if the file already exists. Returns the inode number, or 0. */
+uint32_t ext2_create(const char *path, const void *data, size_t size) {
+    uint32_t inode_num = ext2_create_empty(path);
+
+    if (inode_num == 0)
+        return 0;
+
+    if (size > 0 && ext2_write(inode_num, 0, data, size) != size)
+        return 0;
+
+    return inode_num;
 }
