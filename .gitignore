@@ -17,3 +17,4 @@ userspace/libc/test
 
 # Archives
 *.tgz
+.claude/
