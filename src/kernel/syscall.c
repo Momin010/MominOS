@@ -4,6 +4,7 @@
 #include "tty.h"
 #include "vfs.h"
 #include "elf.h"
+#include "vmm.h"
 
 #define SYS_WRITE   1
 #define SYS_READ    2
@@ -21,6 +22,10 @@
 #define O_CREAT  0x40
 #define O_TRUNC  0x200
 #define O_APPEND 0x400
+
+/* Must be >= MAX_ARGV in elf.c so the boundary validates every argv slot the
+   loader later walks and copies. */
+#define SPAWN_MAX_ARGV 32
 
 /* Optional stdout-redirect descriptor passed to SYS_SPAWN in a3. The child's
    fd 1 is opened by the kernel on this path so its stdout lands in a file. */
@@ -52,14 +57,68 @@ static uint64_t str_copy(char *dst, const char *src, uint64_t cap) {
     return n;
 }
 
-/* Resolve a user-supplied path against the process cwd into abs[].
-   Absolute paths (leading '/') are copied verbatim; relative paths are
-   joined onto cwd. */
+/* Lexically normalize an absolute path in place: collapse "." and empty
+   components, and resolve ".." by popping the previous component. ".." at the
+   root stays at the root, so a path can never escape above "/". The result is
+   always absolute and has no trailing slash (except the bare root "/"). */
+static void normalize_path(char *path) {
+    char out[256];
+    uint64_t o = 0;       /* write cursor in out[]; out is built as components */
+    uint64_t i = 0;
+
+    /* every absolute path starts with a single leading '/'. */
+    out[o++] = '/';
+
+    while (path[i]) {
+        uint64_t start;
+        uint64_t len;
+
+        while (path[i] == '/')        /* skip run of slashes */
+            i++;
+        start = i;
+        while (path[i] && path[i] != '/')
+            i++;
+        len = i - start;
+
+        if (len == 0)
+            continue;                 /* trailing slash */
+        if (len == 1 && path[start] == '.')
+            continue;                 /* "." -> no-op */
+        if (len == 2 && path[start] == '.' && path[start + 1] == '.') {
+            /* pop the last component, clamping at root */
+            while (o > 1 && out[o - 1] != '/')
+                o--;
+            if (o > 1)
+                o--;                  /* drop the separating '/' */
+            continue;
+        }
+
+        /* append "/component", bounded by out[] */
+        if (o > 1) {
+            if (o + 1 >= sizeof(out))
+                break;
+            out[o++] = '/';
+        }
+        for (uint64_t k = 0; k < len; k++) {
+            if (o + 1 >= sizeof(out))
+                break;
+            out[o++] = path[start + k];
+        }
+    }
+
+    out[o] = 0;
+    str_copy(path, out, 256);
+}
+
+/* Resolve a user-supplied path against the process cwd into abs[], then
+   normalize so ".." can never escape root. Absolute paths (leading '/') are
+   copied verbatim; relative paths are joined onto cwd. */
 static void resolve_path(const char *path, char *abs, uint64_t cap) {
     struct thread *cur = sched_current_thread();
 
     if (path[0] == '/') {
         str_copy(abs, path, cap);
+        normalize_path(abs);
         return;
     }
 
@@ -71,6 +130,7 @@ static void resolve_path(const char *path, char *abs, uint64_t cap) {
         }
     }
     str_copy(abs + n, path, cap - n);
+    normalize_path(abs);
 }
 
 static int alloc_fd(struct thread *t) {
@@ -108,6 +168,11 @@ uint64_t syscall_dispatch(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3) {
     if (n == SYS_WRITE) {
         const char *buf = (const char *)a2;
 
+        /* user supplies buf/len: must lie wholly in the user half and not wrap.
+           guards both the vfs path and the serial buf[i] loop below. */
+        if (!vmm_user_range_ok(a2, a3))
+            return (uint64_t)-1;
+
         /* fd 1 (stdout) and 2 (stderr): write to a redirected file if one is
            installed in the fd table, otherwise to the serial console. */
         if (a1 == 1 || a1 == 2) {
@@ -126,6 +191,10 @@ uint64_t syscall_dispatch(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3) {
     }
 
     if (n == SYS_READ) {
+        /* kernel writes into the user-supplied buffer: validate before any
+           path can touch it (both tty_read and vfs_read store into it). */
+        if (!vmm_user_range_ok(a2, a3))
+            return (uint64_t)-1;
         if (a1 == 0)
             return tty_read((char *)a2, a3);
         if (a1 >= 3 && a1 < MAX_FDS && cur->fds[a1] != 0)
@@ -138,6 +207,8 @@ uint64_t syscall_dispatch(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3) {
         vfs_file_t *file;
         int fd;
 
+        if (!vmm_user_str_ok(a1, VMM_USER_STR_MAX))
+            return (uint64_t)-1;
         resolve_path((const char *)a1, abs, sizeof(abs));
         /* a write intent (O_WRONLY/O_TRUNC/O_APPEND, or bare O_CREAT) opens a
            write-through handle; O_APPEND keeps content, otherwise truncate. */
@@ -180,6 +251,39 @@ uint64_t syscall_dispatch(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3) {
         const struct spawn_redirect *redir = (const struct spawn_redirect *)a3;
         vfs_file_t *out = 0;
         struct thread *child;
+
+        /* program path string */
+        if (!vmm_user_str_ok(a1, VMM_USER_STR_MAX))
+            return (uint64_t)-1;
+
+        /* argv may be 0 (no args). Otherwise validate each pointer slot before
+           dereferencing it, then the string it points at, capped at SPAWN_MAX_ARGV
+           (elf.c walks/copies these same pointers, so they must be safe here). */
+        if (a2 != 0) {
+            uint64_t i;
+
+            for (i = 0; i < SPAWN_MAX_ARGV; i++) {
+                uint64_t slot = a2 + i * sizeof(char *);
+
+                if (!vmm_user_range_ok(slot, sizeof(char *)))
+                    return (uint64_t)-1;
+                if (argv[i] == 0)
+                    break;                  /* NULL terminator */
+                if (!vmm_user_str_ok((uint64_t)argv[i], VMM_USER_STR_MAX))
+                    return (uint64_t)-1;
+            }
+            if (i == SPAWN_MAX_ARGV)        /* no terminator within the cap */
+                return (uint64_t)-1;
+        }
+
+        /* redir struct (if given) and its path string */
+        if (a3 != 0) {
+            if (!vmm_user_range_ok(a3, sizeof(struct spawn_redirect)))
+                return (uint64_t)-1;
+            if (redir->path != 0 &&
+                !vmm_user_str_ok((uint64_t)redir->path, VMM_USER_STR_MAX))
+                return (uint64_t)-1;
+        }
 
         /* If the parent requested stdout redirection, open the target now (in
            the parent's cwd context) so failures surface before we spawn. */
@@ -243,6 +347,11 @@ uint64_t syscall_dispatch(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3) {
         char abs[256];
         struct readdir_pack pack;
 
+        /* path string in, kernel packs records into the user buffer out. */
+        if (!vmm_user_str_ok(a1, VMM_USER_STR_MAX))
+            return (uint64_t)-1;
+        if (!vmm_user_range_ok(a2, a3))
+            return (uint64_t)-1;
         resolve_path((const char *)a1, abs, sizeof(abs));
         pack.buf = (char *)a2;
         pack.cap = a3;
@@ -256,6 +365,8 @@ uint64_t syscall_dispatch(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3) {
         char abs[256];
         struct vfs_stat stat;
 
+        if (!vmm_user_str_ok(a1, VMM_USER_STR_MAX))
+            return (uint64_t)-1;
         resolve_path((const char *)a1, abs, sizeof(abs));
         if (!vfs_stat(abs, &stat) || stat.type != 2)   /* EXT2_FT_DIR */
             return (uint64_t)-1;
@@ -266,6 +377,10 @@ uint64_t syscall_dispatch(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3) {
     if (n == SYS_GETCWD) {
         char *buf = (char *)a1;
         uint64_t cap = a2;
+
+        /* kernel writes up to cap bytes into the user buffer. */
+        if (!vmm_user_range_ok(a1, cap))
+            return (uint64_t)-1;
         return str_copy(buf, cur->cwd, cap);
     }
 

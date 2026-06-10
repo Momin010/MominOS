@@ -72,7 +72,7 @@ userspace/libc/crt0.o: userspace/libc/crt0.asm
 	$(AS) $(ASFLAGS) $< -o $@
 
 # libc-linked programs: crt0 + program + libc objects.
-USER_PROGS = init sh ls cat echo argtest wtest bigtest
+USER_PROGS = init sh ls cat echo argtest wtest bigtest sectest
 USER_BINS  = $(addprefix $(BIN)/,$(USER_PROGS))
 
 $(BIN)/%: userspace/%.c $(LIBC_CRT0) $(LIBC_C_OBJS) | $(BIN)

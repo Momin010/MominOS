@@ -304,6 +304,94 @@ void vmm_unmap(uint64_t virt) {
     invlpg(virt);
 }
 
+/* Walk the CURRENTLY ACTIVE address space (caller's CR3) and return 1 if virt
+   maps to a present USER page. Syscalls run on the calling process's CR3 (no
+   CR3 switch on kernel entry, the kernel half is shared in), so this sees the
+   process's lower-half user mappings, which the kernel-pml4 walk in vmm_phys
+   cannot. The VMM_USER bit must be set at every level for a CPL3-accessible
+   page. The direct map is shared into every address space, so the P2V
+   dereferences below are valid mid-syscall. */
+static int user_page_present(uint64_t virt) {
+    uint16_t pml4_i = (virt >> 39) & 0x1FF;
+    uint16_t pdpt_i = (virt >> 30) & 0x1FF;
+    uint16_t pd_i = (virt >> 21) & 0x1FF;
+    uint16_t pt_i = (virt >> 12) & 0x1FF;
+    uint64_t need = VMM_PRESENT | VMM_USER;
+    uint64_t *pml4 = p2v(read_cr3() & PAGE_ADDR_MASK);
+    uint64_t *pdpt;
+    uint64_t *pd;
+    uint64_t *pt;
+
+    if ((pml4[pml4_i] & need) != need)
+        return 0;
+    pdpt = p2v(pml4[pml4_i] & PAGE_ADDR_MASK);
+
+    if ((pdpt[pdpt_i] & need) != need)
+        return 0;
+    if (pdpt[pdpt_i] & PTE_PS)           /* 1GB user page */
+        return 1;
+    pd = p2v(pdpt[pdpt_i] & PAGE_ADDR_MASK);
+
+    if ((pd[pd_i] & need) != need)
+        return 0;
+    if (pd[pd_i] & PTE_PS)               /* 2MB user page */
+        return 1;
+    pt = p2v(pd[pd_i] & PAGE_ADDR_MASK);
+
+    return (pt[pt_i] & need) == need;
+}
+
+/* Validate a user buffer [ptr, ptr+len): it must lie wholly in the user half
+   with no wrap (rejects kernel-half and non-canonical pointers), and every
+   page it spans must be a present user page in the caller's address space
+   (so the kernel never faults dereferencing an unmapped/kernel pointer). */
+int vmm_user_range_ok(uint64_t ptr, uint64_t len) {
+    uint64_t end;
+    uint64_t page;
+
+    if (len == 0)
+        return ptr <= VMM_USER_MAX;     /* empty buffer: pointer just in range */
+
+    end = ptr + len;
+    if (end < ptr)                      /* arithmetic wrap */
+        return 0;
+    if (end > VMM_USER_MAX)             /* spills into / past the user half */
+        return 0;
+
+    /* confirm every page in the range is mapped and user-accessible. */
+    for (page = ptr & ~(PAGE_SIZE - 1); page < end; page += PAGE_SIZE) {
+        if (!user_page_present(page))
+            return 0;
+    }
+    return 1;
+}
+
+/* Validate a NUL-terminated user string at ptr: in the user half, terminating
+   within max_len bytes, and on present user pages. The page check before each
+   read guarantees the kernel never faults scanning it. */
+int vmm_user_str_ok(uint64_t ptr, uint64_t max_len) {
+    const char *s = (const char *)ptr;
+    uint64_t i;
+
+    if (ptr == 0 || ptr >= VMM_USER_MAX)
+        return 0;
+    if (!user_page_present(ptr & ~(PAGE_SIZE - 1)))
+        return 0;
+
+    for (i = 0; i < max_len; i++) {
+        uint64_t cur = ptr + i;
+
+        if (cur >= VMM_USER_MAX)         /* byte i would leave the user half */
+            return 0;
+        /* crossing into a new page: validate it before touching it. */
+        if ((cur & (PAGE_SIZE - 1)) == 0 && !user_page_present(cur))
+            return 0;
+        if (s[i] == 0)
+            return 1;
+    }
+    return 0;                            /* no terminator within max_len */
+}
+
 uint64_t vmm_phys(uint64_t virt) {
     uint16_t pml4_i = (virt >> 39) & 0x1FF;
     uint16_t pdpt_i = (virt >> 30) & 0x1FF;

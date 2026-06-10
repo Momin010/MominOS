@@ -16,6 +16,10 @@
 #define USER_STACK_SIZE (64ULL * 1024)
 #define PAGE_SIZE 4096ULL
 #define MAX_ARGV 32
+/* Upper bound on an ELF image we will kmalloc. stat.size is attacker-influenced
+   (a process can spawn any file); cap it so a bogus/huge size cannot wrap or
+   exhaust the heap. 16MB is far larger than any real userspace binary here. */
+#define MAX_ELF_SIZE (16ULL * 1024 * 1024)
 
 struct elf64_ehdr {
     uint8_t e_ident[EI_NIDENT];
@@ -212,6 +216,10 @@ struct thread *elf_load_process(const char *path, char *const argv[], struct thr
     if (!vfs_stat(path, &stat))
         return 0;
 
+    /* reject empty or implausibly large images before allocating. */
+    if (stat.size == 0 || stat.size > MAX_ELF_SIZE)
+        return 0;
+
     file = vfs_open(path);
     if (file == 0)
         return 0;
@@ -235,6 +243,16 @@ struct thread *elf_load_process(const char *path, char *const argv[], struct thr
         eh->e_ident[2] != 'L' || eh->e_ident[3] != 'F' ||
         eh->e_ident[4] != 2) {
         serial_print("[ELF] invalid image\n");
+        kfree(image);
+        return 0;
+    }
+
+    /* the program-header table must lie fully within the loaded image, so a
+       crafted e_phoff/e_phnum/e_phentsize cannot read past image[]. */
+    if (eh->e_phentsize < sizeof(struct elf64_phdr) ||
+        eh->e_phoff > stat.size ||
+        (uint64_t)eh->e_phnum * eh->e_phentsize > stat.size - eh->e_phoff) {
+        serial_print("[ELF] bad program headers\n");
         kfree(image);
         return 0;
     }
