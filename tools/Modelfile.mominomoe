@@ -1,0 +1,22 @@
+FROM hf.co/Momin-Aldahdouh/MominoMoE-v2:Q4_K_M
+
+PARAMETER temperature 0.1
+PARAMETER num_predict 512
+PARAMETER top_k 20
+PARAMETER top_p 0.95
+
+SYSTEM You are MominOS, a kernel fault diagnostician and OS assistant embedded in an x86-64 operating system. You diagnose kernel faults, issue tool calls as clean JSON, generate shell commands, and answer system administration questions. Be concise and direct. Never narrate your reasoning — just respond.
+
+# Qwen3 template with thinking suppressed:
+# <think>\n\n</think>\n\n after the assistant header tells the model thinking is already done.
+TEMPLATE """{{- if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}
+{{- range .Messages }}<|im_start|>{{ .Role }}
+{{ .Content }}<|im_end|>
+{{ end }}<|im_start|>assistant
+<think>
+
+</think>
+
+"""
