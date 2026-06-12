@@ -112,8 +112,6 @@ def main():
     # ── Training config ───────────────────────────────────────────────────
     sft_config = SFTConfig(
         output_dir=args.output,
-        max_seq_length=args.seq_len,
-
         per_device_train_batch_size=args.batch,
         gradient_accumulation_steps=args.grad_accum,
         gradient_checkpointing=True,
@@ -147,6 +145,7 @@ def main():
         train_dataset=train_ds,
         eval_dataset=val_ds,
         peft_config=lora_config,
+        max_seq_length=args.seq_len,
         callbacks=[EarlyStoppingCallback(early_stopping_patience=5)],
     )
 
