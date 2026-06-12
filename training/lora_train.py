@@ -145,7 +145,6 @@ def main():
         train_dataset=train_ds,
         eval_dataset=val_ds,
         peft_config=lora_config,
-        max_seq_length=args.seq_len,
         callbacks=[EarlyStoppingCallback(early_stopping_patience=5)],
     )
 
