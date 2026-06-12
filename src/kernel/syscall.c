@@ -5,6 +5,7 @@
 #include "vfs.h"
 #include "elf.h"
 #include "vmm.h"
+#include "../ai/diag/capture.h"
 
 #define SYS_WRITE   1
 #define SYS_READ    2
@@ -162,7 +163,7 @@ static int readdir_pack_cb(const char *name, uint8_t name_len, struct vfs_stat *
     return 1;
 }
 
-uint64_t syscall_dispatch(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3) {
+static uint64_t syscall_dispatch_impl(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3) {
     struct thread *cur = sched_current_thread();
 
     if (n == SYS_WRITE) {
@@ -386,4 +387,13 @@ uint64_t syscall_dispatch(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3) {
 
     (void)str_eq;
     return (uint64_t)-1;
+}
+
+uint64_t syscall_dispatch(uint64_t n, uint64_t a1, uint64_t a2, uint64_t a3) {
+    uint64_t ret = syscall_dispatch_impl(n, a1, a2, a3);
+    if (n != 6) { /* skip SYS_EXIT — thread_exit_code never returns */
+        struct thread *cur = sched_current_thread();
+        diag_capture_syscall(n, a1, a2, a3, ret, cur ? cur->id : 0);
+    }
+    return ret;
 }

@@ -4,6 +4,8 @@
 #include "pic.h"
 #include "timer.h"
 #include "sched.h"
+#include "../ai/diag/capture.h"
+#include "../ai/diag/context.h"
 
 #define IDT_ENTRIES 256
 #define KERNEL_CODE_SELECTOR 0x08
@@ -137,6 +139,21 @@ void isr_handler(struct isr_frame *frame) {
         serial_print_hex(cr2);
         serial_print(" cr3=");
         serial_print_hex(cr3);
+    }
+
+    /* Capture fault context for MominoMoE diagnostician */
+    {
+        uint64_t _cr2 = 0;
+        struct thread *_t = sched_current_thread();
+        if (frame->vector == 14)
+            __asm__ volatile ("mov %%cr2, %0" : "=r"(_cr2));
+        diag_capture_fault(frame, _t ? _t->id : 0, _t ? _t->cwd : "/", _cr2);
+    }
+
+    {
+        static char _ctx[2048];
+        if (diag_build_context(_ctx, sizeof(_ctx)) > 0)
+            serial_print(_ctx);
     }
 
     serial_print("\n[ISR] halted\n");

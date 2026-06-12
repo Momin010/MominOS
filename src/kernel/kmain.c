@@ -14,6 +14,7 @@
 #include "elf.h"
 #include "tty.h"
 #include "memmap.h"
+#include "../ai/diag/capture.h"
 
 void kmain(uint64_t mb_info_phys) {
     serial_putc('2');
@@ -42,6 +43,7 @@ void kmain(uint64_t mb_info_phys) {
 
     arch_init();
     sched_init();
+    diag_init();
 
     idt_init();
     pic_remap();
